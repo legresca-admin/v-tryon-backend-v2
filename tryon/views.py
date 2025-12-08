@@ -56,14 +56,21 @@ def tryon_v2(request):
     logger.info("API v2 try-on request received from IP=%s", client_ip)
     
     # Rate limiting: 10 requests per hour per IP
-    if is_ratelimited(
+    # Check if rate limited (this increments the counter)
+    hourly_limited = is_ratelimited(
         request=request,
         group='tryon_v2_hourly',
         key='ip',
         rate='10/h',
         method='POST',
         increment=True
-    ):
+    )
+    
+    # Increment our own tracking counter
+    from .utils import increment_rate_limit_count
+    increment_rate_limit_count(request, 'hourly')
+    
+    if hourly_limited:
         logger.warning(
             "API v2: Rate limit exceeded (hourly) for IP=%s - Current: %d/%d",
             client_ip, hourly_status['current_count'] + 1, hourly_status['limit']
@@ -83,14 +90,20 @@ def tryon_v2(request):
         )
     
     # Rate limiting: 40 requests per day per IP
-    if is_ratelimited(
+    # Check if rate limited (this increments the counter)
+    daily_limited = is_ratelimited(
         request=request,
         group='tryon_v2_daily',
         key='ip',
         rate='40/d',
         method='POST',
         increment=True
-    ):
+    )
+    
+    # Increment our own tracking counter
+    increment_rate_limit_count(request, 'daily')
+    
+    if daily_limited:
         logger.warning(
             "API v2: Rate limit exceeded (daily) for IP=%s - Current: %d/%d",
             client_ip, daily_status['current_count'] + 1, daily_status['limit']
@@ -226,14 +239,18 @@ def tryon_v2(request):
             logger.warning("API v2: Error cleaning up temp files: %s", cleanup_error)
         
         # Get updated rate limit status (after increment)
-        # Note: Status is checked AFTER increment, so we subtract 1 to show current usage
+        # The rate limit was incremented by is_ratelimited above, so we need to get the current count
         hourly_status = get_rate_limit_status(request, 'hourly')
         daily_status = get_rate_limit_status(request, 'daily')
         
-        # The count was just incremented, so current_count already includes this request
-        # But we want to show remaining correctly
+        # The count includes the current request (was incremented by is_ratelimited)
         hourly_used = hourly_status['current_count']
         daily_used = daily_status['current_count']
+        
+        logger.info(
+            "API v2: Rate limit after request - IP=%s, Hourly: %d/%d, Daily: %d/%d",
+            client_ip, hourly_used, hourly_status['limit'], daily_used, daily_status['limit']
+        )
         
         # Return JSON response with image URL
         # Note: hourly_used and daily_used already include the current request

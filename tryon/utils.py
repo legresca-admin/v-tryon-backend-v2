@@ -25,7 +25,7 @@ def get_client_ip(request):
 def get_rate_limit_status(request, rate_type='hourly'):
     """
     Get current rate limit usage information for the client.
-    Uses django-ratelimit's cache key format: rl:{group}:{key}:{method}
+    Uses our own tracking cache keys that sync with django-ratelimit.
     
     Args:
         request: Django request object
@@ -34,58 +34,32 @@ def get_rate_limit_status(request, rate_type='hourly'):
     Returns:
         dict with keys: current_count, limit, remaining, percentage_used
     """
-    import hashlib
-    
     client_ip = get_client_ip(request)
     
     if rate_type == 'hourly':
         group = 'tryon_v2_hourly'
-        rate = '10/h'
         limit = 10
+        cache_ttl = 3600  # 1 hour
     else:  # daily
         group = 'tryon_v2_daily'
-        rate = '40/d'
         limit = 40
+        cache_ttl = 86400  # 24 hours
     
-    # django-ratelimit cache key format: rl:{group}:{key}:{method}
-    # The key is hashed for the IP address
-    # Format: rl:{group}:ip:{ip_hash}:POST
-    key_hash = hashlib.md5(f'ip:{client_ip}'.encode()).hexdigest()[:8]
-    cache_key = f'rl:{group}:{key_hash}:POST'
+    # Use our own cache key for tracking (separate from django-ratelimit's internal keys)
+    # This ensures we can always read the count
+    our_cache_key = f'tryon_rate_limit_{group}_{client_ip}'
     
-    # Also try alternative format (django-ratelimit may use different format)
-    # Try both formats
-    cache_key_alt = f'rl:{group}:ip:{client_ip}:POST'
+    # Get count from our tracking cache
+    current_count = cache.get(our_cache_key, 0)
     
-    # Get the count from cache
-    current_count = cache.get(cache_key, None)
-    if current_count is None:
-        current_count = cache.get(cache_key_alt, 0)
-    
-    # If still None, try searching all keys with pattern
-    if current_count is None:
-        # Try to get from is_ratelimited with increment=False
-        from django_ratelimit.core import is_ratelimited
-        try:
-            # This will return True if limited, but we can check the cache after
-            is_ratelimited(
-                request=request,
-                group=group,
-                key='ip',
-                rate=rate,
-                method='POST',
-                increment=False
-            )
-            # Try getting again
-            current_count = cache.get(cache_key, 0)
-            if current_count is None:
-                current_count = cache.get(cache_key_alt, 0)
-        except:
-            current_count = 0
-    
-    # If count is None or not found, it's 0
+    # If count is None or invalid, default to 0
     if current_count is None:
         current_count = 0
+    else:
+        try:
+            current_count = int(current_count)
+        except (ValueError, TypeError):
+            current_count = 0
     
     remaining = max(0, limit - current_count)
     percentage_used = (current_count / limit * 100) if limit > 0 else 0
@@ -97,6 +71,45 @@ def get_rate_limit_status(request, rate_type='hourly'):
         'percentage_used': round(percentage_used, 2),
         'ip': client_ip
     }
+
+
+def increment_rate_limit_count(request, rate_type='hourly'):
+    """
+    Increment our own rate limit counter.
+    This is called after django-ratelimit's check passes.
+    
+    Args:
+        request: Django request object
+        rate_type: 'hourly' or 'daily'
+    """
+    client_ip = get_client_ip(request)
+    
+    if rate_type == 'hourly':
+        group = 'tryon_v2_hourly'
+        cache_ttl = 3600  # 1 hour
+    else:  # daily
+        group = 'tryon_v2_daily'
+        cache_ttl = 86400  # 24 hours
+    
+    our_cache_key = f'tryon_rate_limit_{group}_{client_ip}'
+    
+    # Get current count and increment
+    current_count = cache.get(our_cache_key, 0)
+    if current_count is None:
+        current_count = 0
+    
+    try:
+        current_count = int(current_count)
+    except (ValueError, TypeError):
+        current_count = 0
+    
+    # Increment
+    new_count = current_count + 1
+    
+    # Store with TTL
+    cache.set(our_cache_key, new_count, cache_ttl)
+    
+    logger.debug("Incremented rate limit for IP=%s, type=%s, count=%d", client_ip, rate_type, new_count)
 
 
 def reset_rate_limit_for_ip(ip_address, rate_type='both'):
