@@ -1,0 +1,21 @@
+"""
+URL configuration for v_tryon_backend_v2 project.
+
+The `urlpatterns` list routes URLs to views. For more information please see:
+    https://docs.djangoproject.com/en/5.2/topics/http/urls/
+"""
+from django.contrib import admin
+from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('', include('tryon.urls')),
+    path('', include('version_control.urls')),
+]
+
+# Serve media files in development
+# In production, Nginx should serve these files
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

@@ -1,0 +1,49 @@
+[Unit]
+Description=V-Tryon Backend V2 Django Application (Gunicorn)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=vtryon
+Group=vtryon
+RuntimeDirectory=v-tryon-backend-v2
+WorkingDirectory=/home/vtryon/v-tryon-backend-v2
+
+# Environment
+Environment="PATH=/home/vtryon/v-tryon-backend-v2/venv/bin"
+Environment="DJANGO_SETTINGS_MODULE=v_tryon_backend_v2.settings"
+EnvironmentFile=/home/vtryon/v-tryon-backend-v2/.env
+
+# Google Cloud Credentials (if using service account)
+# Uncomment if using service account JSON file
+# Environment="GOOGLE_APPLICATION_CREDENTIALS=/etc/v-tryon/secrets/gcp-service-account.json"
+
+# ExecStart
+ExecStart=/home/vtryon/v-tryon-backend-v2/venv/bin/gunicorn \
+    --config /home/vtryon/v-tryon-backend-v2/gunicorn_config.py \
+    v_tryon_backend_v2.wsgi:application
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/vtryon/v-tryon-backend-v2/media /home/vtryon/v-tryon-backend-v2/staticfiles
+
+# Restart
+Restart=always
+RestartSec=3
+
+# Timeouts
+TimeoutStartSec=300
+TimeoutStopSec=1200
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=v-tryon-backend-v2
+
+[Install]
+WantedBy=multi-user.target
+
