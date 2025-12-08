@@ -25,6 +25,7 @@ def get_client_ip(request):
 def get_rate_limit_status(request, rate_type='hourly'):
     """
     Get current rate limit usage information for the client.
+    Uses django-ratelimit's cache key format: rl:{group}:{key}:{method}
     
     Args:
         request: Django request object
@@ -33,16 +34,59 @@ def get_rate_limit_status(request, rate_type='hourly'):
     Returns:
         dict with keys: current_count, limit, remaining, percentage_used
     """
+    import hashlib
+    
     client_ip = get_client_ip(request)
     
     if rate_type == 'hourly':
-        cache_key = f'ratelimit:tryon_v2_hourly:{client_ip}'
+        group = 'tryon_v2_hourly'
+        rate = '10/h'
         limit = 10
     else:  # daily
-        cache_key = f'ratelimit:tryon_v2_daily:{client_ip}'
+        group = 'tryon_v2_daily'
+        rate = '40/d'
         limit = 40
     
-    current_count = cache.get(cache_key, 0)
+    # django-ratelimit cache key format: rl:{group}:{key}:{method}
+    # The key is hashed for the IP address
+    # Format: rl:{group}:ip:{ip_hash}:POST
+    key_hash = hashlib.md5(f'ip:{client_ip}'.encode()).hexdigest()[:8]
+    cache_key = f'rl:{group}:{key_hash}:POST'
+    
+    # Also try alternative format (django-ratelimit may use different format)
+    # Try both formats
+    cache_key_alt = f'rl:{group}:ip:{client_ip}:POST'
+    
+    # Get the count from cache
+    current_count = cache.get(cache_key, None)
+    if current_count is None:
+        current_count = cache.get(cache_key_alt, 0)
+    
+    # If still None, try searching all keys with pattern
+    if current_count is None:
+        # Try to get from is_ratelimited with increment=False
+        from django_ratelimit.core import is_ratelimited
+        try:
+            # This will return True if limited, but we can check the cache after
+            is_ratelimited(
+                request=request,
+                group=group,
+                key='ip',
+                rate=rate,
+                method='POST',
+                increment=False
+            )
+            # Try getting again
+            current_count = cache.get(cache_key, 0)
+            if current_count is None:
+                current_count = cache.get(cache_key_alt, 0)
+        except:
+            current_count = 0
+    
+    # If count is None or not found, it's 0
+    if current_count is None:
+        current_count = 0
+    
     remaining = max(0, limit - current_count)
     percentage_used = (current_count / limit * 100) if limit > 0 else 0
     
@@ -58,7 +102,7 @@ def get_rate_limit_status(request, rate_type='hourly'):
 def reset_rate_limit_for_ip(ip_address, rate_type='both'):
     """
     Reset rate limit for a specific IP address.
-    Useful for admin operations or testing.
+    Uses django-ratelimit's cache key format.
     
     Args:
         ip_address: IP address to reset
@@ -67,14 +111,35 @@ def reset_rate_limit_for_ip(ip_address, rate_type='both'):
     Returns:
         bool: True if reset was successful
     """
+    from django.test import RequestFactory
+    
     try:
+        # Create a mock request to generate proper cache keys
+        factory = RequestFactory()
+        request = factory.post('/v2/tryon')
+        request.META['REMOTE_ADDR'] = ip_address
+        
         if rate_type in ('hourly', 'both'):
-            cache_key_hourly = f'ratelimit:tryon_v2_hourly:{ip_address}'
+            from django_ratelimit.core import _get_cache_key
+            cache_key_hourly = _get_cache_key(
+                request=request,
+                group='tryon_v2_hourly',
+                key='ip',
+                rate='10/h',
+                method='POST'
+            )
             cache.delete(cache_key_hourly)
             logger.info("Reset hourly rate limit for IP=%s", ip_address)
         
         if rate_type in ('daily', 'both'):
-            cache_key_daily = f'ratelimit:tryon_v2_daily:{ip_address}'
+            from django_ratelimit.core import _get_cache_key
+            cache_key_daily = _get_cache_key(
+                request=request,
+                group='tryon_v2_daily',
+                key='ip',
+                rate='40/d',
+                method='POST'
+            )
             cache.delete(cache_key_daily)
             logger.info("Reset daily rate limit for IP=%s", ip_address)
         

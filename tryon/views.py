@@ -55,17 +55,6 @@ def tryon_v2(request):
     client_ip = get_client_ip(request)
     logger.info("API v2 try-on request received from IP=%s", client_ip)
     
-    # Get current rate limit status for logging
-    hourly_status = get_rate_limit_status(request, 'hourly')
-    daily_status = get_rate_limit_status(request, 'daily')
-    
-    logger.debug(
-        "API v2: Rate limit status for IP=%s - Hourly: %d/%d (remaining: %d), Daily: %d/%d (remaining: %d)",
-        client_ip,
-        hourly_status['current_count'], hourly_status['limit'], hourly_status['remaining'],
-        daily_status['current_count'], daily_status['limit'], daily_status['remaining']
-    )
-    
     # Rate limiting: 10 requests per hour per IP
     if is_ratelimited(
         request=request,
@@ -236,11 +225,18 @@ def tryon_v2(request):
         except Exception as cleanup_error:
             logger.warning("API v2: Error cleaning up temp files: %s", cleanup_error)
         
-        # Get updated rate limit status (after increment from is_ratelimited)
+        # Get updated rate limit status (after increment)
+        # Note: Status is checked AFTER increment, so we subtract 1 to show current usage
         hourly_status = get_rate_limit_status(request, 'hourly')
         daily_status = get_rate_limit_status(request, 'daily')
         
+        # The count was just incremented, so current_count already includes this request
+        # But we want to show remaining correctly
+        hourly_used = hourly_status['current_count']
+        daily_used = daily_status['current_count']
+        
         # Return JSON response with image URL
+        # Note: hourly_used and daily_used already include the current request
         response_data = {
             'success': True,
             'image_url': image_url,
@@ -248,13 +244,13 @@ def tryon_v2(request):
             'rate_limit': {
                 'hourly': {
                     'limit': hourly_status['limit'],
-                    'remaining': max(0, hourly_status['remaining'] - 1),
-                    'used': hourly_status['current_count'] + 1
+                    'remaining': max(0, hourly_status['limit'] - hourly_used),
+                    'used': hourly_used
                 },
                 'daily': {
                     'limit': daily_status['limit'],
-                    'remaining': max(0, daily_status['remaining'] - 1),
-                    'used': daily_status['current_count'] + 1
+                    'remaining': max(0, daily_status['limit'] - daily_used),
+                    'used': daily_used
                 }
             }
         }
@@ -263,9 +259,9 @@ def tryon_v2(request):
         
         # Add rate limit headers for client information
         response['X-RateLimit-Limit-Hourly'] = str(hourly_status['limit'])
-        response['X-RateLimit-Remaining-Hourly'] = str(max(0, hourly_status['remaining'] - 1))
+        response['X-RateLimit-Remaining-Hourly'] = str(max(0, hourly_status['limit'] - hourly_used))
         response['X-RateLimit-Limit-Daily'] = str(daily_status['limit'])
-        response['X-RateLimit-Remaining-Daily'] = str(max(0, daily_status['remaining'] - 1))
+        response['X-RateLimit-Remaining-Daily'] = str(max(0, daily_status['limit'] - daily_used))
         
         logger.info(
             "API v2: Returning image URL for IP=%s - URL: %s, Hourly: %d/%d, Daily: %d/%d",

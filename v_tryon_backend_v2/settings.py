@@ -91,12 +91,29 @@ DATABASES = {
 
 # Cache configuration for rate limiting
 # Using local memory cache for rate limiting
+# Cache for rate limiting
+# IMPORTANT: LocMemCache doesn't work across multiple Gunicorn workers
+# For production with multiple workers, use file-based cache or Redis
+# File-based cache persists across workers and server restarts
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'unique-snowflake',
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': '/tmp/django_cache',
+        'OPTIONS': {
+            'MAX_ENTRIES': 10000,
+        }
     }
 }
+
+# Alternative: Use Redis for production (better performance)
+# Install: apt install redis-server
+# pip install django-redis
+# CACHES = {
+#     'default': {
+#         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+#         'LOCATION': 'redis://127.0.0.1:6379/1',
+#     }
+# }
 
 # Rate limiting configuration
 RATELIMIT_ENABLE = os.getenv('RATELIMIT_ENABLE', 'true').lower() == 'true'
