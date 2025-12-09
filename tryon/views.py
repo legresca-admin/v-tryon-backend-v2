@@ -19,7 +19,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 
 from .services.vertex_tryon import virtual_try_on
-from .utils import get_client_ip, get_rate_limit_status
+from .utils import get_client_ip, get_rate_limit_status, check_rate_limit, increment_rate_limit_count
 
 logger = logging.getLogger(__name__)
 
@@ -55,72 +55,72 @@ def tryon_v2(request):
     client_ip = get_client_ip(request)
     logger.info("API v2 try-on request received from IP=%s", client_ip)
     
-    # Rate limiting: 10 requests per hour per IP
-    # Check if rate limited (this increments the counter)
-    hourly_limited = is_ratelimited(
-        request=request,
-        group='tryon_v2_hourly',
-        key='ip',
-        rate='10/h',
-        method='POST',
-        increment=True
-    )
+    # Rate limiting: Check BEFORE incrementing to prevent exceeding limits
+    # This checks both hourly and daily limits without incrementing counters
+    rate_limit_check = check_rate_limit(request)
+    hourly_status = rate_limit_check['hourly_status']
+    daily_status = rate_limit_check['daily_status']
     
-    # Increment our own tracking counter
-    from .utils import increment_rate_limit_count
+    # Check if either limit is exceeded
+    if not rate_limit_check['allowed']:
+        # Determine which limit was exceeded
+        hourly_exceeded = hourly_status['current_count'] >= hourly_status['limit']
+        daily_exceeded = daily_status['current_count'] >= daily_status['limit']
+        
+        if hourly_exceeded:
+            logger.warning(
+                "API v2: Rate limit exceeded (hourly) for IP=%s - Current: %d/%d",
+                client_ip, hourly_status['current_count'], hourly_status['limit']
+            )
+            return Response(
+                {
+                    'error': 'Rate limit exceeded',
+                    'message': 'You have exceeded the hourly rate limit of 10 requests per hour. Please try again later.',
+                    'rate_limit': {
+                        'hourly': {
+                            'limit': hourly_status['limit'],
+                            'remaining': hourly_status['remaining'],
+                            'used': hourly_status['current_count']
+                        },
+                        'daily': {
+                            'limit': daily_status['limit'],
+                            'remaining': daily_status['remaining'],
+                            'used': daily_status['current_count']
+                        }
+                    }
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+        
+        if daily_exceeded:
+            logger.warning(
+                "API v2: Rate limit exceeded (daily) for IP=%s - Current: %d/%d",
+                client_ip, daily_status['current_count'], daily_status['limit']
+            )
+            return Response(
+                {
+                    'error': 'Rate limit exceeded',
+                    'message': 'You have exceeded the daily rate limit of 40 requests per day. Please try again tomorrow.',
+                    'rate_limit': {
+                        'hourly': {
+                            'limit': hourly_status['limit'],
+                            'remaining': hourly_status['remaining'],
+                            'used': hourly_status['current_count']
+                        },
+                        'daily': {
+                            'limit': daily_status['limit'],
+                            'remaining': daily_status['remaining'],
+                            'used': daily_status['current_count']
+                        }
+                    }
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+    
+    # Rate limit check passed - now increment counters
+    # Only increment if the request is allowed (we've already checked above)
     increment_rate_limit_count(request, 'hourly')
-    
-    if hourly_limited:
-        logger.warning(
-            "API v2: Rate limit exceeded (hourly) for IP=%s - Current: %d/%d",
-            client_ip, hourly_status['current_count'] + 1, hourly_status['limit']
-        )
-        return Response(
-            {
-                'error': 'Rate limit exceeded',
-                'message': 'You have exceeded the hourly rate limit of 10 requests per hour. Please try again later.',
-                'rate_limit': {
-                    'type': 'hourly',
-                    'limit': hourly_status['limit'],
-                    'current': hourly_status['current_count'] + 1,
-                    'retry_after': '1 hour'
-                }
-            },
-            status=status.HTTP_429_TOO_MANY_REQUESTS
-        )
-    
-    # Rate limiting: 40 requests per day per IP
-    # Check if rate limited (this increments the counter)
-    daily_limited = is_ratelimited(
-        request=request,
-        group='tryon_v2_daily',
-        key='ip',
-        rate='40/d',
-        method='POST',
-        increment=True
-    )
-    
-    # Increment our own tracking counter
     increment_rate_limit_count(request, 'daily')
-    
-    if daily_limited:
-        logger.warning(
-            "API v2: Rate limit exceeded (daily) for IP=%s - Current: %d/%d",
-            client_ip, daily_status['current_count'] + 1, daily_status['limit']
-        )
-        return Response(
-            {
-                'error': 'Rate limit exceeded',
-                'message': 'You have exceeded the daily rate limit of 40 requests per day. Please try again tomorrow.',
-                'rate_limit': {
-                    'type': 'daily',
-                    'limit': daily_status['limit'],
-                    'current': daily_status['current_count'] + 1,
-                    'retry_after': '24 hours'
-                }
-            },
-            status=status.HTTP_429_TOO_MANY_REQUESTS
-        )
     
     # Check for required files
     if 'person_image' not in request.FILES:
