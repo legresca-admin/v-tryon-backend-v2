@@ -187,3 +187,120 @@ def check_rate_limit(request):
         'ip': client_ip
     }
 
+
+def get_rate_limit_status_device(deviceId, rate_type='hourly'):
+    """
+    Get current rate limit usage information for a device.
+    
+    Args:
+        deviceId: Device identifier string
+        rate_type: 'hourly' or 'daily'
+    
+    Returns:
+        dict with keys: current_count, limit, remaining, percentage_used
+    """
+    # Sanitize deviceId for cache key safety (strip whitespace and newlines)
+    deviceId = str(deviceId).strip()
+    
+    if rate_type == 'hourly':
+        group = 'tryon_v2_hourly'
+        limit = 10
+        cache_ttl = 3600  # 1 hour
+    else:  # daily
+        group = 'tryon_v2_daily'
+        limit = 40
+        cache_ttl = 86400  # 24 hours
+    
+    our_cache_key = f'tryon_rate_limit_{group}_device_{deviceId}'
+    
+    # Get count from our tracking cache
+    current_count = cache.get(our_cache_key, 0)
+    
+    # If count is None or invalid, default to 0
+    if current_count is None:
+        current_count = 0
+    else:
+        try:
+            current_count = int(current_count)
+        except (ValueError, TypeError):
+            current_count = 0
+    
+    remaining = max(0, limit - current_count)
+    percentage_used = (current_count / limit * 100) if limit > 0 else 0
+    
+    return {
+        'current_count': current_count,
+        'limit': limit,
+        'remaining': remaining,
+        'percentage_used': round(percentage_used, 2),
+        'deviceId': deviceId
+    }
+
+
+def increment_rate_limit_count_device(deviceId, rate_type='hourly'):
+    """
+    Increment rate limit counter for a device.
+    
+    Args:
+        deviceId: Device identifier string
+        rate_type: 'hourly' or 'daily'
+    """
+    # Sanitize deviceId for cache key safety (strip whitespace and newlines)
+    deviceId = str(deviceId).strip()
+    
+    if rate_type == 'hourly':
+        group = 'tryon_v2_hourly'
+        cache_ttl = 3600  # 1 hour
+    else:  # daily
+        group = 'tryon_v2_daily'
+        cache_ttl = 86400  # 24 hours
+    
+    our_cache_key = f'tryon_rate_limit_{group}_device_{deviceId}'
+    
+    # Get current count and increment
+    current_count = cache.get(our_cache_key, 0)
+    if current_count is None:
+        current_count = 0
+    
+    try:
+        current_count = int(current_count)
+    except (ValueError, TypeError):
+        current_count = 0
+    
+    # Increment
+    new_count = current_count + 1
+    
+    # Store with TTL
+    cache.set(our_cache_key, new_count, cache_ttl)
+    
+    logger.debug("Incremented rate limit for deviceId=%s, type=%s, count=%d", deviceId, rate_type, new_count)
+
+
+def check_rate_limit_device(deviceId):
+    """
+    Check if device would be rate limited without incrementing the counter.
+    
+    Args:
+        deviceId: Device identifier string
+    
+    Returns:
+        dict with keys: allowed, hourly_status, daily_status
+    """
+    # Sanitize deviceId for cache key safety (strip whitespace and newlines)
+    deviceId = str(deviceId).strip()
+    
+    hourly_status = get_rate_limit_status_device(deviceId, 'hourly')
+    daily_status = get_rate_limit_status_device(deviceId, 'daily')
+    
+    # Check if either limit would be exceeded
+    hourly_exceeded = hourly_status['current_count'] >= hourly_status['limit']
+    daily_exceeded = daily_status['current_count'] >= daily_status['limit']
+    
+    allowed = not (hourly_exceeded or daily_exceeded)
+    
+    return {
+        'allowed': allowed,
+        'hourly_status': hourly_status,
+        'daily_status': daily_status,
+        'deviceId': deviceId
+    }
