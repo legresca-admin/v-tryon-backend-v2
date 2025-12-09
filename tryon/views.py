@@ -20,6 +20,11 @@ from rest_framework.response import Response
 
 from .services.vertex_tryon import virtual_try_on
 from .utils import get_client_ip, get_rate_limit_status, check_rate_limit, increment_rate_limit_count
+from .utils import (
+    get_rate_limit_status_device,
+    check_rate_limit_device,
+    increment_rate_limit_count_device
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,7 @@ def tryon_v2(request):
     No authentication required - this is a public API.
     
     Accepts:
+    - deviceId: Device identifier (required)
     - person_image: Image file of the person
     - garment_image: Image file of the garment
     
@@ -46,18 +52,35 @@ def tryon_v2(request):
     
     The generated image is saved to the server's media directory and can be accessed via the returned URL.
     
-    Rate Limits (per IP):
+    Rate Limits (per deviceId):
     - 10 requests per hour
     - 40 requests per day
     
-    Rate limit is tracked by IP address. Each unique IP has its own limit counter.
+    Rate limit is tracked by device ID. Each unique device has its own limit counter.
     """
-    client_ip = get_client_ip(request)
-    logger.info("API v2 try-on request received from IP=%s", client_ip)
+    # Check for required deviceId
+    deviceId = request.data.get('deviceId')
+    if not deviceId:
+        logger.warning("API v2: Missing deviceId in request")
+        return Response(
+            {'error': 'deviceId is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Strip whitespace and newlines from deviceId to prevent cache key issues
+    deviceId = str(deviceId).strip()
+    if not deviceId:
+        logger.warning("API v2: deviceId is empty after stripping whitespace")
+        return Response(
+            {'error': 'deviceId cannot be empty'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    logger.info("API v2 try-on request received from deviceId=%s", deviceId)
     
     # Rate limiting: Check BEFORE incrementing to prevent exceeding limits
     # This checks both hourly and daily limits without incrementing counters
-    rate_limit_check = check_rate_limit(request)
+    rate_limit_check = check_rate_limit_device(deviceId)
     hourly_status = rate_limit_check['hourly_status']
     daily_status = rate_limit_check['daily_status']
     
@@ -69,8 +92,8 @@ def tryon_v2(request):
         
         if hourly_exceeded:
             logger.warning(
-                "API v2: Rate limit exceeded (hourly) for IP=%s - Current: %d/%d",
-                client_ip, hourly_status['current_count'], hourly_status['limit']
+                "API v2: Rate limit exceeded (hourly) for deviceId=%s - Current: %d/%d",
+                deviceId, hourly_status['current_count'], hourly_status['limit']
             )
             return Response(
                 {
@@ -94,8 +117,8 @@ def tryon_v2(request):
         
         if daily_exceeded:
             logger.warning(
-                "API v2: Rate limit exceeded (daily) for IP=%s - Current: %d/%d",
-                client_ip, daily_status['current_count'], daily_status['limit']
+                "API v2: Rate limit exceeded (daily) for deviceId=%s - Current: %d/%d",
+                deviceId, daily_status['current_count'], daily_status['limit']
             )
             return Response(
                 {
@@ -119,8 +142,8 @@ def tryon_v2(request):
     
     # Rate limit check passed - now increment counters
     # Only increment if the request is allowed (we've already checked above)
-    increment_rate_limit_count(request, 'hourly')
-    increment_rate_limit_count(request, 'daily')
+    increment_rate_limit_count_device(deviceId, 'hourly')
+    increment_rate_limit_count_device(deviceId, 'daily')
     
     # Check for required files
     if 'person_image' not in request.FILES:
@@ -239,17 +262,16 @@ def tryon_v2(request):
             logger.warning("API v2: Error cleaning up temp files: %s", cleanup_error)
         
         # Get updated rate limit status (after increment)
-        # The rate limit was incremented by is_ratelimited above, so we need to get the current count
-        hourly_status = get_rate_limit_status(request, 'hourly')
-        daily_status = get_rate_limit_status(request, 'daily')
+        hourly_status = get_rate_limit_status_device(deviceId, 'hourly')
+        daily_status = get_rate_limit_status_device(deviceId, 'daily')
         
-        # The count includes the current request (was incremented by is_ratelimited)
+        # The count includes the current request
         hourly_used = hourly_status['current_count']
         daily_used = daily_status['current_count']
         
         logger.info(
-            "API v2: Rate limit after request - IP=%s, Hourly: %d/%d, Daily: %d/%d",
-            client_ip, hourly_used, hourly_status['limit'], daily_used, daily_status['limit']
+            "API v2: Rate limit after request - deviceId=%s, Hourly: %d/%d, Daily: %d/%d",
+            deviceId, hourly_used, hourly_status['limit'], daily_used, daily_status['limit']
         )
         
         # Return JSON response with image URL
@@ -281,8 +303,8 @@ def tryon_v2(request):
         response['X-RateLimit-Remaining-Daily'] = str(max(0, daily_status['limit'] - daily_used))
         
         logger.info(
-            "API v2: Returning image URL for IP=%s - URL: %s, Hourly: %d/%d, Daily: %d/%d",
-            client_ip,
+            "API v2: Returning image URL for deviceId=%s - URL: %s, Hourly: %d/%d, Daily: %d/%d",
+            deviceId,
             image_url,
             hourly_status['current_count'], hourly_status['limit'],
             daily_status['current_count'], daily_status['limit']
