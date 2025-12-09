@@ -204,11 +204,11 @@ def get_rate_limit_status_device(deviceId, rate_type='hourly'):
     
     if rate_type == 'hourly':
         group = 'tryon_v2_hourly'
-        limit = 1
+        limit = 10
         cache_ttl = 3600  # 1 hour
     else:  # daily
         group = 'tryon_v2_daily'
-        limit = 5
+        limit = 40
         cache_ttl = 86400  # 24 hours
     
     our_cache_key = f'tryon_rate_limit_{group}_device_{deviceId}'
