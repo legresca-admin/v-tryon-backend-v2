@@ -25,6 +25,11 @@ from .utils import (
     check_rate_limit_device,
     increment_rate_limit_count_device
 )
+from .utils import (
+    get_user_rate_limit_status,
+    check_user_rate_limit,
+    increment_user_rate_limit
+)
 
 from .models import TryonRequest
 from .serializers import TryonRequestSerializer
@@ -46,7 +51,7 @@ def tryon_v2(request):
     Requires authentication - user must be authenticated.
     
     Accepts:
-    - deviceId: Device identifier (required)
+    - deviceId: Device identifier (optional, for tracking purposes)
     - person_image: Image file of the person
     - garment_image: Image file of the garment
     
@@ -66,102 +71,74 @@ def tryon_v2(request):
     All images (person, garment, and generated) are uploaded to BunnyCDN storage
     and their URLs are stored in the database. The record ID is returned in the response.
     
-    Rate Limits (per deviceId):
-    - 10 requests per hour
-    - 40 requests per day
-    
-    Rate limit is tracked by device ID. Each unique device has its own limit counter.
+    Rate Limits:
+    - Rate limit is managed per user by admin
+    - Admin can set custom limits for each user via Django admin
+    - Once limit is reached, user cannot generate more images until admin resets
     """
     # Get authenticated user from request
     user = request.user
     logger.info(f"Authenticated user: {user.username} (ID: {user.id})")
     
-    # Check for required deviceId
-    deviceId = request.data.get('deviceId')
-    if not deviceId:
-        logger.warning("API v2: Missing deviceId in request")
-        return Response(
-            {'error': 'deviceId is required'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+    # Get deviceId if provided (optional, for tracking purposes)
+    deviceId = request.data.get('deviceId', '')
+    if deviceId:
+        deviceId = str(deviceId).strip()
     
-    # Strip whitespace and newlines from deviceId to prevent cache key issues
-    deviceId = str(deviceId).strip()
-    if not deviceId:
-        logger.warning("API v2: deviceId is empty after stripping whitespace")
-        return Response(
-            {'error': 'deviceId cannot be empty'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    logger.info("API v2 try-on request received from deviceId=%s", deviceId)
+    logger.info("API v2 try-on request received from user=%s (ID: %d)", user.username, user.id)
     
     # Rate limiting: Check BEFORE incrementing to prevent exceeding limits
-    # This checks both hourly and daily limits without incrementing counters
-    rate_limit_check = check_rate_limit_device(deviceId)
-    hourly_status = rate_limit_check['hourly_status']
-    daily_status = rate_limit_check['daily_status']
+    rate_limit_check = check_user_rate_limit(user)
+    rate_limit_status = rate_limit_check['status']
     
-    # Check if either limit is exceeded
+    # Check if rate limit is not set by admin
+    if not rate_limit_status.get('exists', True):
+        logger.warning(
+            "API v2: No rate limit set for user=%s (ID: %d) - admin must set rate limit first",
+            user.username, user.id
+        )
+        return Response(
+            {
+                'error': 'Rate limit not configured',
+                'message': 'You cannot generate images. Please contact admin to set your rate limit.',
+                'rate_limit': {
+                    'limit': 0,
+                    'remaining': 0,
+                    'used': 0,
+                    'is_unlimited': False,
+                    'exists': False
+                },
+                'user_name': user.username,
+                'user_id': user.id
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Check if limit is exceeded
     if not rate_limit_check['allowed']:
-        # Determine which limit was exceeded
-        hourly_exceeded = hourly_status['current_count'] >= hourly_status['limit']
-        daily_exceeded = daily_status['current_count'] >= daily_status['limit']
-        
-        if hourly_exceeded:
-            logger.warning(
-                "API v2: Rate limit exceeded (hourly) for deviceId=%s - Current: %d/%d",
-                deviceId, hourly_status['current_count'], hourly_status['limit']
-            )
-            return Response(
-                {
-                    'error': 'Rate limit exceeded',
-                    'message': 'You have exceeded the hourly rate limit of 10 requests per hour. Please try again later.',
-                    'rate_limit': {
-                        'hourly': {
-                            'limit': hourly_status['limit'],
-                            'remaining': hourly_status['remaining'],
-                            'used': hourly_status['current_count']
-                        },
-                        'daily': {
-                            'limit': daily_status['limit'],
-                            'remaining': daily_status['remaining'],
-                            'used': daily_status['current_count']
-                        }
-                    }
+        logger.warning(
+            "API v2: Rate limit exceeded for user=%s (ID: %d) - Current: %d/%d",
+            user.username, user.id, rate_limit_status['current_count'], rate_limit_status['limit']
+        )
+        return Response(
+            {
+                'error': 'Rate limit exceeded',
+                'message': 'You cannot generate image now. You have reached your rate limit.',
+                'rate_limit': {
+                    'limit': rate_limit_status['limit'],
+                    'remaining': rate_limit_status['remaining'],
+                    'used': rate_limit_status['current_count'],
+                    'is_unlimited': rate_limit_status['is_unlimited']
                 },
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
-        
-        if daily_exceeded:
-            logger.warning(
-                "API v2: Rate limit exceeded (daily) for deviceId=%s - Current: %d/%d",
-                deviceId, daily_status['current_count'], daily_status['limit']
-            )
-            return Response(
-                {
-                    'error': 'Rate limit exceeded',
-                    'message': 'You have exceeded the daily rate limit of 40 requests per day. Please try again tomorrow.',
-                    'rate_limit': {
-                        'hourly': {
-                            'limit': hourly_status['limit'],
-                            'remaining': hourly_status['remaining'],
-                            'used': hourly_status['current_count']
-                        },
-                        'daily': {
-                            'limit': daily_status['limit'],
-                            'remaining': daily_status['remaining'],
-                            'used': daily_status['current_count']
-                        }
-                    }
-                },
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
+                'user_name': user.username,
+                'user_id': user.id
+            },
+            status=status.HTTP_429_TOO_MANY_REQUESTS
+        )
     
-    # Rate limit check passed - now increment counters
+    # Rate limit check passed - now increment counter
     # Only increment if the request is allowed (we've already checked above)
-    increment_rate_limit_count_device(deviceId, 'hourly')
-    increment_rate_limit_count_device(deviceId, 'daily')
+    increment_user_rate_limit(user)
     
     # Check for required files
     if 'person_image' not in request.FILES:
@@ -345,20 +322,19 @@ def tryon_v2(request):
             logger.warning("API v2: Error cleaning up temp files: %s", cleanup_error)
         
         # Get updated rate limit status (after increment)
-        hourly_status = get_rate_limit_status_device(deviceId, 'hourly')
-        daily_status = get_rate_limit_status_device(deviceId, 'daily')
+        rate_limit_status = get_user_rate_limit_status(user)
         
         # The count includes the current request
-        hourly_used = hourly_status['current_count']
-        daily_used = daily_status['current_count']
+        used_count = rate_limit_status['current_count']
+        limit = rate_limit_status['limit']
+        remaining = rate_limit_status['remaining']
         
         logger.info(
-            "API v2: Rate limit after request - deviceId=%s, Hourly: %d/%d, Daily: %d/%d",
-            deviceId, hourly_used, hourly_status['limit'], daily_used, daily_status['limit']
+            "API v2: Rate limit after request - user=%s (ID: %d), Used: %d/%d, Remaining: %s",
+            user.username, user.id, used_count, limit, remaining if remaining is not None else 'Unlimited'
         )
         
         # Return JSON response with BunnyCDN URLs and record ID
-        # Note: hourly_used and daily_used already include the current request
         response_data = {
             'success': True,
             'id': saved_record.id if saved_record else None,
@@ -367,34 +343,30 @@ def tryon_v2(request):
             'generated_image_url': generated_image_url,
             'message': 'Try-on image generated successfully',
             'rate_limit': {
-                'hourly': {
-                    'limit': hourly_status['limit'],
-                    'remaining': max(0, hourly_status['limit'] - hourly_used),
-                    'used': hourly_used
-                },
-                'daily': {
-                    'limit': daily_status['limit'],
-                    'remaining': max(0, daily_status['limit'] - daily_used),
-                    'used': daily_used
-                }
-            }
+                'limit': limit,
+                'remaining': remaining,
+                'used': used_count,
+                'is_unlimited': rate_limit_status['is_unlimited']
+            },
+            'user_name': user.username,
+            'user_id': user.id
         }
         
         response = Response(response_data, status=status.HTTP_200_OK)
         
         # Add rate limit headers for client information
-        response['X-RateLimit-Limit-Hourly'] = str(hourly_status['limit'])
-        response['X-RateLimit-Remaining-Hourly'] = str(max(0, hourly_status['limit'] - hourly_used))
-        response['X-RateLimit-Limit-Daily'] = str(daily_status['limit'])
-        response['X-RateLimit-Remaining-Daily'] = str(max(0, daily_status['limit'] - daily_used))
+        response['X-RateLimit-Limit'] = str(limit) if limit > 0 else 'Unlimited'
+        response['X-RateLimit-Remaining'] = str(remaining) if remaining is not None else 'Unlimited'
+        response['X-RateLimit-Used'] = str(used_count)
         
         logger.info(
-            "API v2: Returning response for deviceId=%s - Record ID: %s, Generated URL: %s, Hourly: %d/%d, Daily: %d/%d",
-            deviceId,
+            "API v2: Returning response for user=%s (ID: %d) - Record ID: %s, Generated URL: %s, Used: %d/%d",
+            user.username,
+            user.id,
             saved_record.id if saved_record else None,
             generated_image_url,
-            hourly_status['current_count'], hourly_status['limit'],
-            daily_status['current_count'], daily_status['limit']
+            used_count,
+            limit if limit > 0 else 0
         )
         return response
         

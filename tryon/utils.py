@@ -5,8 +5,10 @@ Utility functions for rate limiting and user tracking
 import logging
 from django.core.cache import cache
 from django_ratelimit.core import is_ratelimited
+from django.contrib.auth import get_user_model
 
 logger = logging.getLogger(__name__)
+User = get_user_model()
 
 
 def get_client_ip(request):
@@ -304,3 +306,163 @@ def check_rate_limit_device(deviceId):
         'daily_status': daily_status,
         'deviceId': deviceId
     }
+
+
+# ============================================================================
+# User-based Rate Limiting Functions
+# ============================================================================
+
+def get_user_rate_limit(user):
+    """
+    Get UserRateLimit instance for the given user (does not create if missing).
+    
+    Args:
+        user: Django User instance
+    
+    Returns:
+        UserRateLimit instance or None if not set by admin
+    """
+    from users.models import UserRateLimit
+    
+    try:
+        return UserRateLimit.objects.get(user=user)
+    except UserRateLimit.DoesNotExist:
+        return None
+
+
+def get_or_create_user_rate_limit(user):
+    """
+    Get or create a UserRateLimit instance for the given user.
+    Used by admin to create rate limits.
+    
+    Args:
+        user: Django User instance
+    
+    Returns:
+        UserRateLimit instance
+    """
+    from users.models import UserRateLimit
+    
+    rate_limit, created = UserRateLimit.objects.get_or_create(
+        user=user,
+        defaults={'limit': 0, 'used_count': 0}
+    )
+    
+    if created:
+        logger.info("Created new UserRateLimit for user=%s (ID: %d)", user.username, user.id)
+    
+    return rate_limit
+
+
+def get_user_rate_limit_status(user):
+    """
+    Get current rate limit usage information for a user.
+    
+    Args:
+        user: Django User instance
+    
+    Returns:
+        dict with keys: current_count, limit, remaining, percentage_used, is_unlimited, exists
+    """
+    rate_limit = get_user_rate_limit(user)
+    
+    # If no rate limit exists, return status indicating it's not set
+    if rate_limit is None:
+        return {
+            'current_count': 0,
+            'limit': 0,
+            'remaining': 0,
+            'percentage_used': 0,
+            'is_unlimited': False,
+            'exists': False,
+            'user_id': user.id,
+            'username': user.username
+        }
+    
+    limit = rate_limit.limit
+    used_count = rate_limit.used_count
+    is_unlimited = (limit == 0)
+    
+    if is_unlimited:
+        remaining = None
+        percentage_used = 0
+    else:
+        remaining = max(0, limit - used_count)
+        percentage_used = (used_count / limit * 100) if limit > 0 else 0
+    
+    return {
+        'current_count': used_count,
+        'limit': limit,
+        'remaining': remaining,
+        'percentage_used': round(percentage_used, 2),
+        'is_unlimited': is_unlimited,
+        'exists': True,
+        'user_id': user.id,
+        'username': user.username
+    }
+
+
+def check_user_rate_limit(user):
+    """
+    Check if user would be rate limited without incrementing the counter.
+    Returns False if no rate limit is set by admin.
+    
+    Args:
+        user: Django User instance
+    
+    Returns:
+        dict with keys: allowed, status
+    """
+    status = get_user_rate_limit_status(user)
+    
+    # If no rate limit exists, user is not allowed
+    if not status.get('exists', True):
+        allowed = False
+    # If unlimited, always allowed
+    elif status['is_unlimited']:
+        allowed = True
+    else:
+        # Check if limit is exceeded
+        allowed = not (status['current_count'] >= status['limit'])
+    
+    return {
+        'allowed': allowed,
+        'status': status
+    }
+
+
+def increment_user_rate_limit(user):
+    """
+    Increment rate limit counter for a user.
+    Only increments if rate limit exists and is not unlimited.
+    
+    Args:
+        user: Django User instance
+    
+    Returns:
+        dict with updated status
+    """
+    rate_limit = get_user_rate_limit(user)
+    
+    # If no rate limit exists, do nothing
+    if rate_limit is None:
+        logger.warning(
+            "Cannot increment rate limit for user=%s (ID: %d) - no rate limit set by admin",
+            user.username, user.id
+        )
+        return get_user_rate_limit_status(user)
+    
+    # Only increment if not unlimited
+    if rate_limit.limit > 0:
+        rate_limit.increment_usage()
+        logger.debug(
+            "Incremented rate limit for user=%s (ID: %d), count=%d/%d",
+            user.username, user.id, rate_limit.used_count, rate_limit.limit
+        )
+    else:
+        logger.debug(
+            "User=%s (ID: %d) has unlimited rate limit, skipping increment",
+            user.username, user.id
+        )
+    
+    return get_user_rate_limit_status(user)
