@@ -15,12 +15,13 @@ from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load environment variables from .env file
+# Explicitly specify the .env file path to ensure it's loaded correctly
+env_path = BASE_DIR / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
@@ -224,6 +225,11 @@ TRYON_CONFIG = {
     'number_of_images': 1,
     'base_steps': 75,
 }
+
+# BunnyCDN Storage Configuration
+BUNNY_STORAGE_ZONE = os.getenv('BUNNY_STORAGE_ZONE', '')
+BUNNY_ACCESS_KEY = os.getenv('BUNNY_ACCESS_KEY', '')
+BUNNY_PULL_ZONE = os.getenv('BUNNY_PULL_ZONE', '')
 
 # Logging configuration
 LOGGING = {

@@ -14,7 +14,7 @@ from django.core.cache import cache
 from django_ratelimit.core import is_ratelimited
 from django_ratelimit.exceptions import Ratelimited
 from rest_framework import status
-from rest_framework.decorators import api_view, parser_classes
+from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 
@@ -26,16 +26,24 @@ from .utils import (
     increment_rate_limit_count_device
 )
 
+from .models import TryonRequest
+from .serializers import TryonRequestSerializer
+from rest_framework.permissions import IsAuthenticated
+from .services.bunny_storage import get_bunny_storage_service
+from version_control.models import AppVersion
+from version_control.serializers import VersionCheckResponseSerializer
+
 logger = logging.getLogger(__name__)
 
 
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser])
 def tryon_v2(request):
     """
-    Public API v2 endpoint for virtual try-on.
+    Authenticated API v2 endpoint for virtual try-on.
     
-    No authentication required - this is a public API.
+    Requires authentication - user must be authenticated.
     
     Accepts:
     - deviceId: Device identifier (required)
@@ -43,14 +51,20 @@ def tryon_v2(request):
     - garment_image: Image file of the garment
     
     Returns:
-    - JSON response with image URL:
+    - JSON response with BunnyCDN URLs and record ID:
       {
         "success": true,
-        "image_url": "http://your-domain.com/media/tryon/2025/12/08/tryon_abc123.png",
-        "message": "Try-on image generated successfully"
+        "id": 123,
+        "image_url": "https://your-pull-zone.b-cdn.net/tryon/2025/12/08/generated_abc123.png",
+        "person_image_url": "https://your-pull-zone.b-cdn.net/tryon/2025/12/08/person_abc123.jpg",
+        "garment_image_url": "https://your-pull-zone.b-cdn.net/tryon/2025/12/08/garment_abc123.jpg",
+        "generated_image_url": "https://your-pull-zone.b-cdn.net/tryon/2025/12/08/generated_abc123.png",
+        "message": "Try-on image generated successfully",
+        "rate_limit": {...}
       }
     
-    The generated image is saved to the server's media directory and can be accessed via the returned URL.
+    All images (person, garment, and generated) are uploaded to BunnyCDN storage
+    and their URLs are stored in the database. The record ID is returned in the response.
     
     Rate Limits (per deviceId):
     - 10 requests per hour
@@ -58,6 +72,10 @@ def tryon_v2(request):
     
     Rate limit is tracked by device ID. Each unique device has its own limit counter.
     """
+    # Get authenticated user from request
+    user = request.user
+    logger.info(f"Authenticated user: {user.username} (ID: {user.id})")
+    
     # Check for required deviceId
     deviceId = request.data.get('deviceId')
     if not deviceId:
@@ -163,10 +181,19 @@ def tryon_v2(request):
     person_file = request.FILES['person_image']
     garment_file = request.FILES['garment_image']
     
+    # Initialize BunnyCDN storage service
+    bunny_storage = get_bunny_storage_service()
+    
     # Create temporary files
     person_temp = None
     garment_temp = None
     result_temp = None
+    
+    # Variables to store BunnyCDN URLs
+    person_image_url = None
+    garment_image_url = None
+    generated_image_url = None
+    saved_record = None
     
     try:
         # Save uploaded files to temporary locations
@@ -185,6 +212,39 @@ def tryon_v2(request):
             person_temp,
             garment_temp
         )
+        
+        # Upload person_image to BunnyCDN
+        now = datetime.now()
+        date_path = now.strftime('%Y/%m/%d')
+        unique_id = str(uuid.uuid4())[:8]
+        person_remote_path = f'tryon/{date_path}/person_{unique_id}.jpg'
+        
+        logger.info("API v2: Uploading person_image to BunnyCDN: %s", person_remote_path)
+        person_image_url = bunny_storage.upload_file(person_temp, person_remote_path, 'image/jpeg')
+        
+        if not person_image_url:
+            logger.error("API v2: Failed to upload person_image to BunnyCDN")
+            return Response(
+                {'error': 'Failed to upload person image to storage'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        logger.info("API v2: Person image uploaded to BunnyCDN: %s", person_image_url)
+        
+        # Upload garment_image to BunnyCDN
+        garment_remote_path = f'tryon/{date_path}/garment_{unique_id}.jpg'
+        
+        logger.info("API v2: Uploading garment_image to BunnyCDN: %s", garment_remote_path)
+        garment_image_url = bunny_storage.upload_file(garment_temp, garment_remote_path, 'image/jpeg')
+        
+        if not garment_image_url:
+            logger.error("API v2: Failed to upload garment_image to BunnyCDN")
+            return Response(
+                {'error': 'Failed to upload garment image to storage'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        logger.info("API v2: Garment image uploaded to BunnyCDN: %s", garment_image_url)
         
         # Call virtual try-on service
         logger.info("API v2: Calling virtual_try_on service")
@@ -218,37 +278,60 @@ def tryon_v2(request):
         with open(result_temp, 'rb') as f:
             image_data = f.read()
         
-        # Generate unique filename with date-based directory structure
-        # Format: tryon/YYYY/MM/DD/tryon_{uuid}.png
-        now = datetime.now()
-        date_path = now.strftime('%Y/%m/%d')
-        unique_id = str(uuid.uuid4())[:8]
-        filename = f'tryon_{unique_id}.png'
-        media_path = f'tryon/{date_path}/{filename}'
+        # Upload generated image to BunnyCDN
+        generated_remote_path = f'tryon/{date_path}/generated_{unique_id}.png'
         
-        # Ensure media directory exists
-        media_dir = Path(settings.MEDIA_ROOT) / 'tryon' / date_path
-        media_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save image to media directory
-        full_path = media_dir / filename
-        with open(full_path, 'wb') as f:
-            f.write(image_data)
-        
-        # Generate the URL for the saved image
-        image_url = f"{settings.MEDIA_URL}{media_path}"
-        # Make it absolute URL if request is available
-        if request:
-            # Get the scheme and host from request
-            scheme = request.scheme
-            host = request.get_host()
-            image_url = f"{scheme}://{host}{settings.MEDIA_URL}{media_path}"
-        
-        logger.info(
-            "API v2: Generated image saved to media directory: %s, URL: %s",
-            full_path,
-            image_url
+        logger.info("API v2: Uploading generated image to BunnyCDN: %s", generated_remote_path)
+        generated_image_url = bunny_storage.upload_file_from_bytes(
+            image_data,
+            generated_remote_path,
+            'image/png'
         )
+        
+        if not generated_image_url:
+            logger.error("API v2: Failed to upload generated image to BunnyCDN")
+            return Response(
+                {'error': 'Failed to upload generated image to storage'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        logger.info("API v2: Generated image uploaded to BunnyCDN: %s", generated_image_url)
+      
+        # Save record to database with BunnyCDN URLs
+        try:
+            serializer = TryonRequestSerializer(
+                data={
+                    'device_id': deviceId,
+                    'person_image_url': person_image_url,
+                    'garment_image_url': garment_image_url,
+                    'generated_image_url': generated_image_url,
+                },
+                context={'user': user}
+            )
+
+            if serializer.is_valid():
+                saved_record = serializer.save()
+                logger.info(
+                    "TryonRequest saved -> ID: %d, User: %s, Person: %s, Garment: %s, Generated: %s",
+                    saved_record.id,
+                    user.username,
+                    person_image_url,
+                    garment_image_url,
+                    generated_image_url
+                )
+            else:
+                logger.warning(f"Serializer validation failed: {serializer.errors}")
+                return Response(
+                    {'error': 'Failed to save request to database', 'details': serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to save TryonRequest to DB: {e}", exc_info=True)
+            return Response(
+                {'error': 'Failed to save request to database'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         
         # Clean up temporary files
         try:
@@ -274,11 +357,14 @@ def tryon_v2(request):
             deviceId, hourly_used, hourly_status['limit'], daily_used, daily_status['limit']
         )
         
-        # Return JSON response with image URL
+        # Return JSON response with BunnyCDN URLs and record ID
         # Note: hourly_used and daily_used already include the current request
         response_data = {
             'success': True,
-            'image_url': image_url,
+            'id': saved_record.id if saved_record else None,
+            'person_image_url': person_image_url,
+            'garment_image_url': garment_image_url,
+            'generated_image_url': generated_image_url,
             'message': 'Try-on image generated successfully',
             'rate_limit': {
                 'hourly': {
@@ -303,9 +389,10 @@ def tryon_v2(request):
         response['X-RateLimit-Remaining-Daily'] = str(max(0, daily_status['limit'] - daily_used))
         
         logger.info(
-            "API v2: Returning image URL for deviceId=%s - URL: %s, Hourly: %d/%d, Daily: %d/%d",
+            "API v2: Returning response for deviceId=%s - Record ID: %s, Generated URL: %s, Hourly: %d/%d, Daily: %d/%d",
             deviceId,
-            image_url,
+            saved_record.id if saved_record else None,
+            generated_image_url,
             hourly_status['current_count'], hourly_status['limit'],
             daily_status['current_count'], daily_status['limit']
         )
