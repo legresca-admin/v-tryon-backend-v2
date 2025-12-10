@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'tryon',
     'version_control',
     'users',
+    'poses',
 ]
 
 MIDDLEWARE = [
