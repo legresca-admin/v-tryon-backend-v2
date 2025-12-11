@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'corsheaders',
     'django_celery_results',  # Celery results (for database result backend)
+    'django_filters',
     'tryon',
     'version_control',
     'users',

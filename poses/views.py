@@ -13,9 +13,12 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.pagination import PageNumberPagination
+from django_filters.rest_framework import DjangoFilterBackend
+from django_filters import FilterSet
 
 from poses.models import SceneTemplate, TryonPoses
-from poses.serializers import SceneTemplateSerializer, SceneGenerationRequestSerializer
+from poses.serializers import SceneTemplateSerializer, SceneGenerationRequestSerializer, TryonPosesSerializer
 from tryon.models import TryonRequest
 from tryon.services.bunny_storage import get_bunny_storage_service
 from poses.services.vertex_imagen_pose import generate_pose_image
@@ -23,6 +26,21 @@ from celery.result import AsyncResult
 from poses.tasks import generate_pose_async
 
 logger = logging.getLogger(__name__)
+
+
+class TryonPosesPagination(PageNumberPagination):
+    """Pagination class for TryonPoses list."""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class TryonPosesFilter(FilterSet):
+    """FilterSet for TryonPoses with inline filtering."""
+    
+    class Meta:
+        model = TryonPoses
+        fields = ['status', 'tryon', 'scene_template']
 
 
 class SceneTemplateListView(APIView):
@@ -57,10 +75,76 @@ class SceneTemplateListView(APIView):
 class GenerateScenePoseView(APIView):
     """
     API view to generate a pose image based on scene template prompt and try-on generated image.
-    
+    Also provides GET endpoints to list and retrieve TryonPoses.
     """
 
     permission_classes = [IsAuthenticated]
+
+    def get(self, request, tryon_pose_id=None):
+        """
+        Get list of try-on poses or a single try-on pose by ID.
+        
+        Query Parameters (for list):
+        - status: Filter by status (pending, processing, completed, failed)
+        - tryon: Filter by try-on request ID
+        - scene_template: Filter by scene template ID
+        - page: Page number (default: 1)
+        - page_size: Items per page (default: 20, max: 100)
+        
+        Returns:
+        - List of try-on poses with filtering and pagination, or
+        - Single try-on pose details if ID is provided
+        """
+        user = request.user
+        
+        # If ID is provided in URL, return single object
+        if tryon_pose_id is not None:
+            try:
+                tryon_pose = TryonPoses.objects.get(id=tryon_pose_id, user=user)
+            except TryonPoses.DoesNotExist:
+                return Response(
+                    {
+                        'success': False,
+                        'error': 'Try-on pose not found or does not belong to you'
+                    },
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            serializer = TryonPosesSerializer(tryon_pose)
+            return Response(
+                {
+                    'success': True,
+                    'data': serializer.data
+                },
+                status=status.HTTP_200_OK
+            )
+        
+        # List view with filtering and pagination
+        queryset = TryonPoses.objects.filter(user=user).order_by('-created_at')
+        
+        # Apply filters using DjangoFilterBackend FilterSet
+        filterset = TryonPosesFilter(request.query_params, queryset=queryset)
+        queryset = filterset.qs
+        
+        # Apply pagination
+        paginator = TryonPosesPagination()
+        paginated_queryset = paginator.paginate_queryset(queryset, request)
+        
+        # Serialize data
+        serializer = TryonPosesSerializer(paginated_queryset, many=True)
+        
+        # Return paginated response
+        response = paginator.get_paginated_response(serializer.data)
+        # Transform to match existing response format
+        paginated_data = response.data
+        response.data = {
+            'success': True,
+            'data': paginated_data.get('results', serializer.data),
+            'count': paginated_data.get('count', len(serializer.data)),
+            'next': paginated_data.get('next'),
+            'previous': paginated_data.get('previous')
+        }
+        return response
 
     def post(self, request):
         """

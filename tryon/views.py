@@ -17,6 +17,9 @@ from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
+from django_filters.rest_framework import DjangoFilterBackend
+from django_filters import FilterSet
 from celery.result import AsyncResult
 
 from .services.vertex_tryon import virtual_try_on
@@ -40,6 +43,21 @@ from version_control.models import AppVersion
 from version_control.serializers import VersionCheckResponseSerializer
 
 logger = logging.getLogger(__name__)
+
+
+class TryonRequestPagination(PageNumberPagination):
+    """Pagination class for TryonRequest list."""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class TryonRequestFilter(FilterSet):
+    """FilterSet for TryonRequest with inline filtering."""
+    
+    class Meta:
+        model = TryonRequest
+        fields = ['status', 'device_id']
 
 
 @api_view(['POST'])
@@ -505,3 +523,74 @@ def current_version(request):
     serializer.is_valid(raise_exception=True)
     
     return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def tryon_list(request):
+    """
+    Get list of try-on requests with filtering and pagination.
+    
+    Query Parameters:
+    - status: Filter by status (pending, processing, completed, failed)
+    - device_id: Filter by device ID
+    - created_at__gte: Filter by created date (greater than or equal) - format: YYYY-MM-DD
+    - created_at__lte: Filter by created date (less than or equal) - format: YYYY-MM-DD
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20, max: 100)
+    
+    Returns:
+    - Paginated list of try-on requests for the authenticated user
+    """
+    user = request.user
+    
+    # Base queryset - only user's own requests
+    queryset = TryonRequest.objects.filter(user=user).order_by('-created_at')
+    
+    # Apply filters using DjangoFilterBackend FilterSet
+    filterset = TryonRequestFilter(request.query_params, queryset=queryset)
+    queryset = filterset.qs
+    
+    # Apply pagination
+    paginator = TryonRequestPagination()
+    paginated_queryset = paginator.paginate_queryset(queryset, request)
+    
+    # Serialize data
+    serializer = TryonRequestSerializer(paginated_queryset, many=True)
+    
+    # Return paginated response
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def tryon_detail(request, tryon_request_id):
+    """
+    Get a single try-on request by ID.
+    
+    Args:
+        tryon_request_id: ID of TryonRequest
+    
+    Returns:
+        Response with try-on request details
+    """
+    user = request.user
+    
+    try:
+        tryon_request = TryonRequest.objects.get(id=tryon_request_id, user=user)
+    except TryonRequest.DoesNotExist:
+        return Response(
+            {
+                'error': 'Try-on request not found or does not belong to you'
+            },
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    serializer = TryonRequestSerializer(tryon_request)
+    return Response(
+        {
+            'success': True,
+            'data': serializer.data
+        },
+        status=status.HTTP_200_OK
+    )

@@ -3,7 +3,7 @@ Serializers for Poses App
 """
 
 from rest_framework import serializers
-from poses.models import SceneTemplate
+from poses.models import SceneTemplate, TryonPoses
 
 
 class SceneTemplateSerializer(serializers.ModelSerializer):
@@ -36,3 +36,26 @@ class SceneGenerationRequestSerializer(serializers.Serializer):
     """
     scene_template_id = serializers.IntegerField(required=True, help_text="ID of the scene template")
     tryon_id = serializers.IntegerField(required=True, help_text="ID of the try-on request")
+
+
+class TryonPosesSerializer(serializers.ModelSerializer):
+    """Serializer for TryonPoses model."""
+    scene_template_name = serializers.CharField(source='scene_template.name', read_only=True)
+    tryon_id = serializers.IntegerField(source='tryon.id', read_only=True)
+    
+    class Meta:
+        model = TryonPoses
+        fields = [
+            'id',
+            'user',
+            'tryon',
+            'tryon_id',
+            'scene_template',
+            'scene_template_name',
+            'generated_image_url',
+            'status',
+            'error_message',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
