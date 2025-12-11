@@ -188,11 +188,13 @@ def virtual_try_on(
         config_params["numberOfImages"] = number_of_images
     if base_steps is not None:
         config_params["baseSteps"] = base_steps
+    # Disable watermark in generated images
+    config_params["addWatermark"] = False
 
     config = RecontextImageConfig(**config_params) if config_params else None
 
     logger.info(
-        "Calling Vertex virtual try-on model with numberOfImages=%s baseSteps=%s",
+        "Calling Vertex virtual try-on model with numberOfImages=%s baseSteps=%s addWatermark=False",
         config_params.get("numberOfImages"),
         config_params.get("baseSteps"),
     )
