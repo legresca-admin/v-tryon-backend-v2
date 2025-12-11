@@ -19,6 +19,8 @@ from poses.serializers import SceneTemplateSerializer, SceneGenerationRequestSer
 from tryon.models import TryonRequest
 from tryon.services.bunny_storage import get_bunny_storage_service
 from poses.services.vertex_imagen_pose import generate_pose_image
+from celery.result import AsyncResult
+from poses.tasks import generate_pose_async
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +30,6 @@ class SceneTemplateListView(APIView):
     API view to get a list of scene templates for the current logged-in user.
     
     """
-    
-
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -54,8 +54,7 @@ class SceneTemplateListView(APIView):
             status=status.HTTP_200_OK
         )
 
-
-class SceneGenerationView(APIView):
+class GenerateScenePoseView(APIView):
     """
     API view to generate a pose image based on scene template prompt and try-on generated image.
     
@@ -118,133 +117,149 @@ class SceneGenerationView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Get try-on image from Bunny CDN URL
-        tryon_image_url = tryon_request.generated_image_url
-        logger.info("Getting try-on image from Bunny CDN URL: %s", tryon_image_url)
-        
-        # Vertex AI Imagen requires local file paths, not URLs
-        # So we need to download from Bunny CDN URL to a temporary file
-        tryon_temp = None
-        output_temp = None
-        
+        # Create TryonPoses record with pending status
+        tryon_pose = TryonPoses.objects.create(
+            user=request.user,
+            tryon=tryon_request,
+            scene_template=scene_template,
+            status='pending'
+        )
+        logger.info(
+            "Created TryonPoses record id=%s for user=%s tryon_id=%s scene_template_id=%s (status: pending)",
+            tryon_pose.id,
+            request.user.id,
+            tryon_id,
+            scene_template_id
+        )
+
+        # Queue the async task
         try:
-            # Vertex AI Imagen requires local file paths (Image.from_file expects a file path)
-            # So we download from Bunny CDN URL to a temporary file
-            logger.debug("Vertex AI Imagen requires local file path, downloading from Bunny CDN")
-            
-            # Download image from Bunny CDN URL to temporary file
-            try:
-                response = requests.get(tryon_image_url, timeout=30)
-                response.raise_for_status()
-            except requests.RequestException as e:
-                logger.error("Failed to download try-on image from Bunny CDN: %s", str(e))
-                return Response(
-                    {
-                        'success': False,
-                        'error': f'Failed to download try-on image from Bunny CDN: {str(e)}'
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-            
-            # Create temporary file for input image
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
-                tmp_file.write(response.content)
-                tryon_temp = tmp_file.name
-
-            logger.info("Try-on image downloaded and saved to temporary file: %s", tryon_temp)
-
-            # Create temporary file for output image
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
-                output_temp = tmp_file.name
-
-            # Generate pose image using Vertex AI Imagen
-            logger.info("Generating pose image with scene prompt: %s", scene_template.prompt[:100])
-            generate_pose_image(
-                input_image_path=tryon_temp,
-                scene_prompt=scene_template.prompt,
-                output_path=output_temp
-            )
-
-            logger.info("Pose image generated successfully: %s", output_temp)
-
-            # Upload generated image to BunnyCDN
-            bunny_service = get_bunny_storage_service()
-            
-            # Generate unique filename
-            unique_id = str(uuid.uuid4())[:8]
-            date_path = datetime.now().strftime('%Y/%m/%d')
-            remote_path = f'poses/pose_generated/{date_path}/pose_{scene_template_id}_{tryon_id}_{unique_id}.png'
-            
-            # Read generated image
-            with open(output_temp, 'rb') as f:
-                image_bytes = f.read()
-            
-            # Upload to BunnyCDN
-            generated_image_url = bunny_service.upload_file_from_bytes(
-                file_bytes=image_bytes,
-                remote_path=remote_path,
-                content_type='image/png'
-            )
-
-            if not generated_image_url:
-                logger.error("Failed to upload generated image to BunnyCDN")
-                return Response(
-                    {
-                        'success': False,
-                        'error': 'Failed to upload generated image to storage'
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-
-            logger.info("Generated image uploaded to BunnyCDN: %s", generated_image_url)
-
-            # Store generated image in database
-            tryon_pose = TryonPoses.objects.create(
-                user=request.user,
-                tryon=tryon_request,
-                scene_template=scene_template,
-                generated_image_url=generated_image_url
-            )
-            logger.info(
-                "Created TryonPoses record id=%s for user=%s tryon_id=%s scene_template_id=%s",
-                tryon_pose.id,
-                request.user.id,
-                tryon_id,
-                scene_template_id
-            )
-
-            return Response(
-                {
-                    'success': True,
-                    'data': {
-                        'id': tryon_pose.id,
-                        'generated_image_url': generated_image_url,
-                        'scene_template_id': scene_template_id,
-                        'scene_template_name': scene_template.name,
-                        'tryon_id': tryon_id,
-                        'created_at': tryon_pose.created_at.isoformat()
-                    }
-                },
-                status=status.HTTP_200_OK
-            )
-
+            task = generate_pose_async.delay(tryon_pose.id)
+            logger.info("Pose generation task queued: tryon_pose_id=%s, task_id=%s", tryon_pose.id, task.id)
         except Exception as e:
-            logger.exception("Error generating pose image: %s", str(e))
+            logger.error("Failed to queue pose generation task: %s", str(e), exc_info=True)
+            # Update tryon_pose status to failed
+            tryon_pose.status = 'failed'
+            tryon_pose.error_message = f'Failed to queue task: {str(e)}'
+            tryon_pose.save()
             return Response(
                 {
                     'success': False,
-                    'error': f'Failed to generate pose image: {str(e)}'
+                    'error': 'Failed to queue pose generation task'
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-        finally:
-            # Clean up temporary files
+
+        return Response(
+            {
+                'success': True,
+                'message': 'Pose generation started',
+                'data': {
+                    'id': tryon_pose.id,
+                    'task_id': task.id,
+                    'status': 'processing',
+                    'scene_template_id': scene_template_id,
+                    'scene_template_name': scene_template.name,
+                    'tryon_id': tryon_id,
+                    'estimated_time': '30-60 seconds',
+                    'created_at': tryon_pose.created_at.isoformat()
+                }
+            },
+            status=status.HTTP_202_ACCEPTED
+        )
+
+class GenerateScenePoseTaskStatusView(APIView):
+    """
+    API view to check status of pose generation task.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, tryon_pose_id):
+        """
+        Check status of async pose generation task.
+        
+        Args:
+            tryon_pose_id: ID of TryonPoses
+        
+        Returns:
+            Response with task status and pose details
+        """
+        
+        try:
+            tryon_pose = TryonPoses.objects.get(id=tryon_pose_id, user=request.user)
+        except TryonPoses.DoesNotExist:
+            return Response(
+                {
+                    'success': False,
+                    'error': 'Try-on pose not found or does not belong to you'
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        task_id = request.query_params.get('task_id')
+        
+        # Refresh from database to get latest status
+        tryon_pose.refresh_from_db()
+        
+        if not task_id:
+            # Return pose status only
+            return Response({
+                'success': True,
+                'tryon_pose_id': tryon_pose.id,
+                'status': tryon_pose.status,
+                'error_message': tryon_pose.error_message if tryon_pose.status == 'failed' else None,
+                'generated_image_url': tryon_pose.generated_image_url if tryon_pose.status == 'completed' else None
+            })
+        
+        # Check Celery task status
+        task_result = AsyncResult(task_id)
+        
+        # If task failed but pose is still processing, update pose
+        if task_result.state == 'FAILURE' and tryon_pose.status == 'processing':
+            error_msg = str(task_result.info) if task_result.info else 'Task failed'
             try:
-                if tryon_temp and os.path.exists(tryon_temp):
-                    os.unlink(tryon_temp)
-                if output_temp and os.path.exists(output_temp):
-                    os.unlink(output_temp)
+                tryon_pose.status = 'failed'
+                tryon_pose.error_message = error_msg[:500]
+                tryon_pose.save()
+                logger.warning("Updated tryon pose %s to failed based on task %s failure", tryon_pose_id, task_id)
             except Exception as e:
-                logger.warning("Failed to clean up temporary files: %s", str(e))
+                logger.error("Failed to update tryon pose %s status: %s", tryon_pose_id, e)
+            tryon_pose.refresh_from_db()
+        
+        # Build response
+        response_data = {
+            'success': True,
+            'tryon_pose_id': tryon_pose.id,
+            'task_id': task_id,
+            'status': tryon_pose.status,
+            'task_state': task_result.state,
+        }
+        
+        if tryon_pose.status == 'failed':
+            response_data['message'] = 'Generation failed'
+            response_data['error'] = tryon_pose.error_message or (str(task_result.info) if task_result.state == 'FAILURE' else 'Unknown error')
+        elif tryon_pose.status == 'completed':
+            response_data['message'] = 'Generation completed successfully'
+            response_data['generated_image_url'] = tryon_pose.generated_image_url
+            response_data['scene_template_id'] = tryon_pose.scene_template.id
+            response_data['scene_template_name'] = tryon_pose.scene_template.name
+            response_data['tryon_id'] = tryon_pose.tryon.id
+        elif task_result.state == 'PENDING':
+            response_data['message'] = 'Task is waiting to be processed'
+        elif task_result.state == 'STARTED':
+            response_data['message'] = 'Task is currently processing'
+        elif task_result.state == 'SUCCESS':
+            response_data['message'] = 'Task completed successfully'
+            response_data['result'] = task_result.result
+            response_data['generated_image_url'] = tryon_pose.generated_image_url
+        elif task_result.state == 'FAILURE':
+            response_data['message'] = 'Task failed'
+            response_data['error'] = str(task_result.info)
+        elif task_result.state == 'RETRY':
+            response_data['message'] = 'Task is being retried'
+        else:
+            response_data['message'] = f'Status: {tryon_pose.status}'
+        
+        return Response(response_data)
 
 

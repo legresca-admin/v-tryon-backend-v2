@@ -205,8 +205,22 @@ class TryonPoses(models.Model):
     )
     generated_image_url = models.URLField(
         max_length=500,
+        blank=True,
+        null=True,
         help_text="BunnyCDN URL for the generated pose image"
     )
+    status = models.CharField(
+        max_length=20,
+        choices=[
+            ('pending', 'Pending'),
+            ('processing', 'Processing'),
+            ('completed', 'Completed'),
+            ('failed', 'Failed'),
+        ],
+        default='pending',
+        help_text="Status of pose generation"
+    )
+    error_message = models.TextField(blank=True, null=True, help_text="Error message if generation failed")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

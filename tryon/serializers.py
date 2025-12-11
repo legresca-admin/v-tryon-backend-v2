@@ -11,7 +11,7 @@ class TryonRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = TryonRequest
         fields = '__all__'
-        read_only_fields = ['id', 'user', 'created_at']
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
     
     def validate_device_id(self, value):
         """Validate device_id is not empty."""
@@ -32,9 +32,10 @@ class TryonRequestSerializer(serializers.ModelSerializer):
         return value
     
     def validate_generated_image_url(self, value):
-        """Validate generated_image_url is a valid URL."""
-        if not value:
-            raise serializers.ValidationError("generated_image_url is required")
+        """Validate generated_image_url is a valid URL (optional)."""
+        # generated_image_url is optional (will be set by async task)
+        if value and not value.strip():
+            return None
         return value
     
     def create(self, validated_data):
