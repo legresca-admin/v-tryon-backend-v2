@@ -50,6 +50,7 @@ class TryonPosesAdmin(admin.ModelAdmin):
         'tryon_info',
         'scene_template_info',
         'generated_image_url',
+        'task_id',
         'created_at',
         'updated_at'
     ]
@@ -61,12 +62,15 @@ class TryonPosesAdmin(admin.ModelAdmin):
         'scene_template__name',
         'generated_image_url'
     ]
-    readonly_fields = ['created_at', 'updated_at']
+    readonly_fields = ['created_at', 'updated_at', 'task_id']
     fields = [
         'user',
         'tryon',
         'scene_template',
         'generated_image_url',
+        'task_id',
+        'status',
+        'error_message',
         'created_at',
         'updated_at'
     ]

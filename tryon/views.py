@@ -41,6 +41,7 @@ from rest_framework.permissions import IsAuthenticated
 from .services.bunny_storage import get_bunny_storage_service
 from version_control.models import AppVersion
 from version_control.serializers import VersionCheckResponseSerializer
+from v_tryon_backend_v2.websocket_utils import send_websocket_status_update
 
 logger = logging.getLogger(__name__)
 
@@ -289,9 +290,29 @@ def tryon_v2(request):
         
         # Queue the async task
         from .tasks import generate_tryon_async
+        # WebSocket updates are now sent directly from the generation task
         try:
             task = generate_tryon_async.delay(saved_record.id)
+            # Store task ID in database for monitoring
+            saved_record.task_id = task.id
+            saved_record.save(update_fields=['task_id'])
             logger.info("API v2: Try-on task queued: request_id=%s, task_id=%s", saved_record.id, task.id)
+            
+            # Send initial "pending" status via WebSocket immediately
+            try:
+                send_websocket_status_update(
+                    user_id=user.id,
+                    task_type='tryon',
+                    task_id=task.id,
+                    status='pending',
+                    tryon_request_id=saved_record.id,
+                    generated_image_url=None,
+                    error_message=None
+                )
+                logger.info("API v2: Sent initial 'pending' status via WebSocket for request_id=%s", saved_record.id)
+            except Exception as ws_error:
+                logger.warning(f"API v2: Failed to send initial WebSocket status: {ws_error}")
+            
         except Exception as e:
             logger.error("API v2: Failed to queue task: %s", str(e), exc_info=True)
             # Update request status to failed

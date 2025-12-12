@@ -13,7 +13,7 @@ from celery import shared_task
 from .models import TryonPoses
 from .services.vertex_imagen_pose import generate_pose_image
 from tryon.services.bunny_storage import get_bunny_storage_service
-
+from v_tryon_backend_v2.websocket_utils import send_websocket_status_update
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +42,33 @@ def generate_pose_async(self, tryon_pose_id):
         tryon_pose.status = 'processing'
         tryon_pose.save()
         logger.info("[CELERY] Updated TryonPoses %s status to 'processing'", tryon_pose_id)
+        
+        # Send WebSocket update: status changed to processing
+        try:
+            from v_tryon_backend_v2.websocket_utils import send_websocket_status_update
+            send_websocket_status_update(
+                user_id=tryon_pose.user.id,
+                task_type='pose',
+                task_id=self.request.id,
+                status='processing',
+                tryon_pose_id=tryon_pose_id,
+                generated_image_url=None,
+                error_message=None,
+                tryon_id=tryon_pose.tryon.id if tryon_pose.tryon else None,
+                scene_template_id=tryon_pose.scene_template.id if tryon_pose.scene_template else None
+            )
+            logger.info(
+                "[CELERY] Sent WebSocket update: status=processing for TryonPoses %s, user_id=%s",
+                tryon_pose_id,
+                tryon_pose.user.id
+            )
+        except Exception as ws_error:
+            # Log error but don't fail the generation task - WebSocket is optional
+            logger.warning(
+                "[CELERY] Failed to send WebSocket update for TryonPoses %s: %s (generation will continue)",
+                tryon_pose_id,
+                str(ws_error)
+            )
         
         # Get try-on request and scene template
         tryon_request = tryon_pose.tryon
@@ -115,6 +142,32 @@ def generate_pose_async(self, tryon_pose_id):
             
             logger.info("[CELERY] ✓ Pose generation completed successfully for TryonPoses %s", tryon_pose_id)
             
+            # Send WebSocket update: status changed to completed
+            try:
+                from v_tryon_backend_v2.websocket_utils import send_websocket_status_update
+                send_websocket_status_update(
+                    user_id=tryon_pose.user.id,
+                    task_type='pose',
+                    task_id=self.request.id,
+                    status='completed',
+                    tryon_pose_id=tryon_pose_id,
+                    generated_image_url=generated_image_url,
+                    error_message=None,
+                    tryon_id=tryon_pose.tryon.id if tryon_pose.tryon else None,
+                    scene_template_id=tryon_pose.scene_template.id if tryon_pose.scene_template else None
+                )
+                logger.info(
+                    "[CELERY] Sent WebSocket update: status=completed for TryonPoses %s, user_id=%s",
+                    tryon_pose_id,
+                    tryon_pose.user.id
+                )
+            except Exception as ws_error:
+                logger.warning(
+                    "[CELERY] Failed to send WebSocket update for TryonPoses %s: %s",
+                    tryon_pose_id,
+                    str(ws_error)
+                )
+            
             return {
                 'status': 'completed',
                 'tryon_pose_id': tryon_pose_id,
@@ -146,6 +199,32 @@ def generate_pose_async(self, tryon_pose_id):
             tryon_pose.status = 'failed'
             tryon_pose.error_message = error_msg[:500]
             tryon_pose.save()
+            
+            # Send WebSocket update: status changed to failed
+            try:
+                
+                send_websocket_status_update(
+                    user_id=tryon_pose.user.id,
+                    task_type='pose',
+                    task_id=self.request.id,
+                    status='failed',
+                    tryon_pose_id=tryon_pose_id,
+                    generated_image_url=None,
+                    error_message=error_msg[:500],
+                    tryon_id=tryon_pose.tryon.id if tryon_pose.tryon else None,
+                    scene_template_id=tryon_pose.scene_template.id if tryon_pose.scene_template else None
+                )
+                logger.info(
+                    "[CELERY] Sent WebSocket update: status=failed for TryonPoses %s, user_id=%s",
+                    tryon_pose_id,
+                    tryon_pose.user.id
+                )
+            except Exception as ws_error:
+                logger.warning(
+                    "[CELERY] Failed to send WebSocket update for TryonPoses %s: %s",
+                    tryon_pose_id,
+                    str(ws_error)
+                )
         except Exception as save_error:
             logger.error("Failed to update TryonPoses %s status: %s", tryon_pose_id, save_error)
         

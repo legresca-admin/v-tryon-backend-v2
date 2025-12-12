@@ -24,6 +24,7 @@ class TryonRequest(models.Model):
     generated_image_url = models.URLField(max_length=500, blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     error_message = models.TextField(blank=True, null=True)
+    task_id = models.CharField(max_length=255, blank=True, null=True, help_text="Celery task ID for tracking")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

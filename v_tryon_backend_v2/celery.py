@@ -31,6 +31,8 @@ logger.info(f"[CELERY CONFIG] Broker URL: {broker_url}")
 # Auto-discover tasks in all installed apps
 app.autodiscover_tasks()
 
+# Note: WebSocket utilities are in websocket_utils.py and don't need to be imported here
+
 # Task result backend
 result_backend = getattr(settings, 'CELERY_RESULT_BACKEND', 'django-db')
 app.conf.result_backend = result_backend

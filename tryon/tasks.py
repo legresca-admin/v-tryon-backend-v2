@@ -9,10 +9,11 @@ from datetime import datetime
 
 from celery import shared_task
 from django.conf import settings
-
+import requests
 from .models import TryonRequest
 from .services.vertex_tryon import virtual_try_on
 from .services.bunny_storage import get_bunny_storage_service
+from v_tryon_backend_v2.websocket_utils import send_websocket_status_update
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,47 @@ def generate_tryon_async(self, tryon_request_id):
         # Get try-on request
         logger.info("[CELERY] Fetching TryonRequest %s", tryon_request_id)
         tryon_request = TryonRequest.objects.get(id=tryon_request_id)
+        
+        # Ensure task_id is set (in case it wasn't set in the view)
+        if not tryon_request.task_id:
+            tryon_request.task_id = self.request.id
+            logger.info("[CELERY] Set task_id %s for request %s", self.request.id, tryon_request_id)
+        
+        # Update status to processing
         tryon_request.status = 'processing'
-        tryon_request.save()
-        logger.info("[CELERY] Updated request %s status to 'processing'", tryon_request_id)
+        tryon_request.save(update_fields=['status', 'task_id'])
+        logger.info(
+            "[CELERY] Updated request %s: status='processing', task_id=%s",
+            tryon_request_id,
+            tryon_request.task_id
+        )
+        
+        # Send WebSocket update: status changed to processing
+        try:
+            from v_tryon_backend_v2.websocket_utils import send_websocket_status_update
+            send_websocket_status_update(
+                user_id=tryon_request.user.id,
+                task_type='tryon',
+                task_id=self.request.id,
+                status='processing',
+                tryon_request_id=tryon_request_id,
+                generated_image_url=None,
+                error_message=None
+            )
+            logger.info(
+                "[CELERY] Sent WebSocket update: status=processing for request %s, user_id=%s",
+                tryon_request_id,
+                tryon_request.user.id
+            )
+        except Exception as ws_error:
+            # Log error but don't fail the generation task - WebSocket is optional
+            logger.warning(
+                "[CELERY] Failed to send WebSocket update for request %s: %s (generation will continue)",
+                tryon_request_id,
+                str(ws_error)
+            )
         
         # Download images from BunnyCDN URLs
-        import requests
         
         person_temp = None
         garment_temp = None
@@ -125,6 +161,30 @@ def generate_tryon_async(self, tryon_request_id):
             
             logger.info("[CELERY] ✓ Try-on generation completed successfully for request %s", tryon_request_id)
             
+            # Send WebSocket update: status changed to completed
+            try:
+                from v_tryon_backend_v2.websocket_utils import send_websocket_status_update
+                send_websocket_status_update(
+                    user_id=tryon_request.user.id,
+                    task_type='tryon',
+                    task_id=self.request.id,
+                    status='completed',
+                    tryon_request_id=tryon_request_id,
+                    generated_image_url=generated_image_url,
+                    error_message=None
+                )
+                logger.info(
+                    "[CELERY] Sent WebSocket update: status=completed for request %s, user_id=%s",
+                    tryon_request_id,
+                    tryon_request.user.id
+                )
+            except Exception as ws_error:
+                logger.warning(
+                    "[CELERY] Failed to send WebSocket update for request %s: %s",
+                    tryon_request_id,
+                    str(ws_error)
+                )
+            
             return {
                 'status': 'completed',
                 'tryon_request_id': tryon_request_id,
@@ -158,6 +218,30 @@ def generate_tryon_async(self, tryon_request_id):
             tryon_request.status = 'failed'
             tryon_request.error_message = error_msg[:500]
             tryon_request.save()
+            
+            # Send WebSocket update: status changed to failed
+            try:
+                
+                send_websocket_status_update(
+                    user_id=tryon_request.user.id,
+                    task_type='tryon',
+                    task_id=self.request.id,
+                    status='failed',
+                    tryon_request_id=tryon_request_id,
+                    generated_image_url=None,
+                    error_message=error_msg[:500]
+                )
+                logger.info(
+                    "[CELERY] Sent WebSocket update: status=failed for request %s, user_id=%s",
+                    tryon_request_id,
+                    tryon_request.user.id
+                )
+            except Exception as ws_error:
+                logger.warning(
+                    "[CELERY] Failed to send WebSocket update for request %s: %s",
+                    tryon_request_id,
+                    str(ws_error)
+                )
         except Exception as save_error:
             logger.error("Failed to update request %s status: %s", tryon_request_id, save_error)
         
