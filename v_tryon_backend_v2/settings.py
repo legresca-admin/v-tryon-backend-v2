@@ -11,15 +11,17 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 import os
+from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load environment variables from .env file
+# Explicitly specify the .env file path to ensure it's loaded correctly
+env_path = BASE_DIR / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
@@ -43,9 +45,11 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'rest_framework_simplejwt',
     'corsheaders',
     'tryon',
     'version_control',
+    'users',
 ]
 
 MIDDLEWARE = [
@@ -84,8 +88,12 @@ WSGI_APPLICATION = 'v_tryon_backend_v2.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv('DB_NAME', ''),
+        'USER': os.getenv('DB_USER', ''),
+        'PASSWORD': os.getenv('DB_PASSWORD', ''),
+        'HOST': os.getenv('DB_HOST', ''),
+        'PORT': os.getenv('DB_PORT', ''),
     }
 }
 
@@ -173,11 +181,24 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
     ],
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ],
     'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
         'rest_framework.parsers.MultiPartParser',
         'rest_framework.parsers.FormParser',
     ],
+}
+
+# SimpleJWT settings
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True,
+    'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
 # CORS settings
@@ -209,6 +230,11 @@ TRYON_CONFIG = {
     'base_steps': 75,
 }
 
+# BunnyCDN Storage Configuration
+BUNNY_STORAGE_ZONE = os.getenv('BUNNY_STORAGE_ZONE', '')
+BUNNY_ACCESS_KEY = os.getenv('BUNNY_ACCESS_KEY', '')
+BUNNY_PULL_ZONE = os.getenv('BUNNY_PULL_ZONE', '')
+
 # Logging configuration
 LOGGING = {
     'version': 1,
@@ -236,6 +262,11 @@ LOGGING = {
             'propagate': False,
         },
         'tryon': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'users': {
             'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
