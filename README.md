@@ -55,6 +55,16 @@ python manage.py migrate
 python manage.py runserver
 ```
 
+```bash
+### celery 
+celery -A v_tryon_backend_v2 worker --loglevel=info
+```
+
+```bash
+### run daphne for websocket
+daphne -p 8000 v_tryon_backend_v2.asgi:application
+```
+
 ## API Endpoints
 
 ### POST /v2/tryon

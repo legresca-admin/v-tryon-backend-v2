@@ -12,7 +12,7 @@ class TryonRequestAdmin(admin.ModelAdmin):
     list_display = ['id', 'user_info', 'device_id', 'person_image_url', 'garment_image_url', 'generated_image_url', 'created_at']
     list_filter = ['created_at']
     search_fields = ['user__email', 'device_id']
-    readonly_fields = ['created_at']
+    readonly_fields = ['created_at', 'task_id', 'status', 'error_message']
 
     def user_info(self, obj):
         if obj.user:

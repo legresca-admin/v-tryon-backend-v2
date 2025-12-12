@@ -10,7 +10,35 @@ https://docs.djangoproject.com/en/5.2/howto/deployment/asgi/
 import os
 
 from django.core.asgi import get_asgi_application
+from channels.routing import ProtocolTypeRouter, URLRouter
+from channels.auth import AuthMiddlewareStack
+from channels.security.websocket import AllowedHostsOriginValidator
+from django.conf import settings
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'v_tryon_backend_v2.settings')
+# Initialize Django first
+django_asgi_app = get_asgi_application()
 
-application = get_asgi_application()
+# Import routing after Django is initialized to avoid AppRegistryNotReady
+from .routing import websocket_urlpatterns
+
+
+# WebSocket middleware stack
+# In development, you might want to skip AllowedHostsOriginValidator
+# For production, keep it for security
+
+
+if settings.DEBUG:
+    # In debug mode, allow all origins (for development)
+    websocket_middleware = URLRouter(websocket_urlpatterns)
+else:
+    # In production, validate origins
+    websocket_middleware = AllowedHostsOriginValidator(
+        AuthMiddlewareStack(
+            URLRouter(websocket_urlpatterns)
+        )
+    )
+
+application = ProtocolTypeRouter({
+    "http": django_asgi_app,
+    "websocket": websocket_middleware,
+})

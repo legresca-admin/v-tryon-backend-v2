@@ -45,17 +45,5 @@ class TryonPosesSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = TryonPoses
-        fields = [
-            'id',
-            'user',
-            'tryon',
-            'tryon_id',
-            'scene_template',
-            'scene_template_name',
-            'generated_image_url',
-            'status',
-            'error_message',
-            'created_at',
-            'updated_at'
-        ]
+        fields = '__all__'
         read_only_fields = ['id', 'user', 'created_at', 'updated_at']

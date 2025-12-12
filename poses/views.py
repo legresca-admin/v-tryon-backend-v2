@@ -24,6 +24,7 @@ from tryon.services.bunny_storage import get_bunny_storage_service
 from poses.services.vertex_imagen_pose import generate_pose_image
 from celery.result import AsyncResult
 from poses.tasks import generate_pose_async
+from v_tryon_backend_v2.websocket_utils import send_websocket_status_update
 
 logger = logging.getLogger(__name__)
 
@@ -119,23 +120,17 @@ class GenerateScenePoseView(APIView):
                 status=status.HTTP_200_OK
             )
         
-        # List view with filtering and pagination
         queryset = TryonPoses.objects.filter(user=user).order_by('-created_at')
         
-        # Apply filters using DjangoFilterBackend FilterSet
         filterset = TryonPosesFilter(request.query_params, queryset=queryset)
         queryset = filterset.qs
         
-        # Apply pagination
         paginator = TryonPosesPagination()
         paginated_queryset = paginator.paginate_queryset(queryset, request)
         
-        # Serialize data
         serializer = TryonPosesSerializer(paginated_queryset, many=True)
         
-        # Return paginated response
         response = paginator.get_paginated_response(serializer.data)
-        # Transform to match existing response format
         paginated_data = response.data
         response.data = {
             'success': True,
@@ -217,9 +212,31 @@ class GenerateScenePoseView(APIView):
         )
 
         # Queue the async task
+        # WebSocket updates are now sent directly from the generation task
         try:
             task = generate_pose_async.delay(tryon_pose.id)
+            # Store task ID in database for monitoring
+            tryon_pose.task_id = task.id
+            tryon_pose.save(update_fields=['task_id'])
             logger.info("Pose generation task queued: tryon_pose_id=%s, task_id=%s", tryon_pose.id, task.id)
+            
+            # Send initial "pending" status via WebSocket immediately
+            try:
+                send_websocket_status_update(
+                    user_id=request.user.id,
+                    task_type='pose',
+                    task_id=task.id,
+                    status='pending',
+                    tryon_pose_id=tryon_pose.id,
+                    generated_image_url=None,
+                    error_message=None,
+                    tryon_id=tryon_id,
+                    scene_template_id=scene_template_id
+                )
+                logger.info("Pose generation: Sent initial 'pending' status via WebSocket for tryon_pose_id=%s", tryon_pose.id)
+            except Exception as ws_error:
+                logger.warning(f"Pose generation: Failed to send initial WebSocket status: {ws_error}")
+
         except Exception as e:
             logger.error("Failed to queue pose generation task: %s", str(e), exc_info=True)
             # Update tryon_pose status to failed

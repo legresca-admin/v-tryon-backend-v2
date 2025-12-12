@@ -12,3 +12,8 @@ gunicorn==23.0.0
 django-redis
 requests==2.32.3
 python-bunnycdn-storage==1.0.0
+django-filter
+channels==4.0.0
+channels-redis==4.2.0
+daphne==4.1.0
+celery==5.4.0

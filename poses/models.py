@@ -221,6 +221,7 @@ class TryonPoses(models.Model):
         help_text="Status of pose generation"
     )
     error_message = models.TextField(blank=True, null=True, help_text="Error message if generation failed")
+    task_id = models.CharField(max_length=255, blank=True, null=True, help_text="Celery task ID for tracking")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

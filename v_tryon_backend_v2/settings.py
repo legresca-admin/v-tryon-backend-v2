@@ -33,8 +33,6 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-m284&!s-xr7dkr_#2jlx*@j83_
 DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '').split(',') if os.getenv('ALLOWED_HOSTS') else []
-
-
 # Application definition
 
 INSTALLED_APPS = [
@@ -49,6 +47,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_celery_results',  # Celery results (for database result backend)
     'django_filters',
+    'channels',  # Django Channels for WebSocket support
     'tryon',
     'version_control',
     'users',
@@ -84,6 +83,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'v_tryon_backend_v2.wsgi.application'
+ASGI_APPLICATION = 'v_tryon_backend_v2.asgi.application'
 
 
 # Database
@@ -146,6 +146,46 @@ CELERY_TASK_SOFT_TIME_LIMIT = 540  # 9 minutes
 # Worker settings
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_WORKER_MAX_TASKS_PER_CHILD = 50
+
+# Channel layers configuration (using Redis)
+# Parse Redis URL from CELERY_BROKER_URL if available, otherwise use defaults
+redis_url = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+
+# Extract host and port from Redis URL
+try:
+    if redis_url and redis_url.startswith('redis://'):
+        redis_parts = redis_url.replace('redis://', '').split('/')[0]
+        if ':' in redis_parts:
+            redis_host, redis_port = redis_parts.split(':')
+            redis_port = int(redis_port)
+        else:
+            redis_host = redis_parts
+            redis_port = 6379
+    else:
+        # Fallback to individual environment variables
+        redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
+        redis_port = int(os.getenv('REDIS_PORT', 6379))
+except (ValueError, AttributeError) as e:
+    # If parsing fails, use defaults
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Failed to parse Redis URL '{redis_url}': {e}. Using defaults.")
+    redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
+    redis_port = int(os.getenv('REDIS_PORT', 6379))
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            "hosts": [(redis_host, redis_port)],
+        },
+    },
+}
+
+# Log channel layer configuration for debugging
+import logging
+logger = logging.getLogger(__name__)
+logger.info(f"Channel layer configured: Redis at {redis_host}:{redis_port}")
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -284,6 +324,32 @@ LOGGING = {
             'propagate': False,
         },
         'users': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'v_tryon_backend_v2': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'channels': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # Celery logs
+        'celery': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'celery.task': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'celery.worker': {
             'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
