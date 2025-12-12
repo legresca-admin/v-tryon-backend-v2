@@ -17,6 +17,10 @@ from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes, permission_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
+from django_filters.rest_framework import DjangoFilterBackend
+from django_filters import FilterSet
+from celery.result import AsyncResult
 
 from .services.vertex_tryon import virtual_try_on
 from .utils import get_client_ip, get_rate_limit_status, check_rate_limit, increment_rate_limit_count
@@ -39,6 +43,21 @@ from version_control.models import AppVersion
 from version_control.serializers import VersionCheckResponseSerializer
 
 logger = logging.getLogger(__name__)
+
+
+class TryonRequestPagination(PageNumberPagination):
+    """Pagination class for TryonRequest list."""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class TryonRequestFilter(FilterSet):
+    """FilterSet for TryonRequest with inline filtering."""
+    
+    class Meta:
+        model = TryonRequest
+        fields = ['status', 'device_id']
 
 
 @api_view(['POST'])
@@ -222,66 +241,16 @@ def tryon_v2(request):
             )
         
         logger.info("API v2: Garment image uploaded to BunnyCDN: %s", garment_image_url)
-        
-        # Call virtual try-on service
-        logger.info("API v2: Calling virtual_try_on service")
-        generated_images = virtual_try_on(
-            person_image_path=person_temp,
-            product_image_path=garment_temp,
-            number_of_images=1,  # Just return one image
-            base_steps=None  # Use default
-        )
-        
-        if not generated_images or len(generated_images) == 0:
-            logger.error("API v2: No images generated from virtual_try_on")
-            return Response(
-                {'error': 'Failed to generate try-on image'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-        # Get the first generated image
-        gen_img = generated_images[0]
-        
-        # Save generated image to temporary file first
-        result_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.png').name
-        
-        # Save the generated image to temp file
-        # The gen_img.image object has a save method
-        gen_img.image.save(result_temp)
-        
-        logger.info("API v2: Generated image saved to temp file %s", result_temp)
-        
-        # Read the image data
-        with open(result_temp, 'rb') as f:
-            image_data = f.read()
-        
-        # Upload generated image to BunnyCDN
-        generated_remote_path = f'tryon/{date_path}/generated_{unique_id}.png'
-        
-        logger.info("API v2: Uploading generated image to BunnyCDN: %s", generated_remote_path)
-        generated_image_url = bunny_storage.upload_file_from_bytes(
-            image_data,
-            generated_remote_path,
-            'image/png'
-        )
-        
-        if not generated_image_url:
-            logger.error("API v2: Failed to upload generated image to BunnyCDN")
-            return Response(
-                {'error': 'Failed to upload generated image to storage'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-        logger.info("API v2: Generated image uploaded to BunnyCDN: %s", generated_image_url)
       
-        # Save record to database with BunnyCDN URLs
+        # Save record to database with BunnyCDN URLs (status will be 'pending')
         try:
             serializer = TryonRequestSerializer(
                 data={
                     'device_id': deviceId,
                     'person_image_url': person_image_url,
                     'garment_image_url': garment_image_url,
-                    'generated_image_url': generated_image_url,
+                    'generated_image_url': '',  # Will be set by task
+                    'status': 'pending',
                 },
                 context={'user': user}
             )
@@ -289,12 +258,11 @@ def tryon_v2(request):
             if serializer.is_valid():
                 saved_record = serializer.save()
                 logger.info(
-                    "TryonRequest saved -> ID: %d, User: %s, Person: %s, Garment: %s, Generated: %s",
+                    "TryonRequest saved -> ID: %d, User: %s, Person: %s, Garment: %s, Status: pending",
                     saved_record.id,
                     user.username,
                     person_image_url,
-                    garment_image_url,
-                    generated_image_url
+                    garment_image_url
                 )
             else:
                 logger.warning(f"Serializer validation failed: {serializer.errors}")
@@ -310,16 +278,30 @@ def tryon_v2(request):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
-        # Clean up temporary files
+        # Clean up temporary files (they're already uploaded to BunnyCDN)
         try:
             if person_temp and os.path.exists(person_temp):
                 os.unlink(person_temp)
             if garment_temp and os.path.exists(garment_temp):
                 os.unlink(garment_temp)
-            if result_temp and os.path.exists(result_temp):
-                os.unlink(result_temp)
         except Exception as cleanup_error:
             logger.warning("API v2: Error cleaning up temp files: %s", cleanup_error)
+        
+        # Queue the async task
+        from .tasks import generate_tryon_async
+        try:
+            task = generate_tryon_async.delay(saved_record.id)
+            logger.info("API v2: Try-on task queued: request_id=%s, task_id=%s", saved_record.id, task.id)
+        except Exception as e:
+            logger.error("API v2: Failed to queue task: %s", str(e), exc_info=True)
+            # Update request status to failed
+            saved_record.status = 'failed'
+            saved_record.error_message = f'Failed to queue task: {str(e)}'
+            saved_record.save()
+            return Response(
+                {'error': 'Failed to queue try-on generation task'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         
         # Get updated rate limit status (after increment)
         rate_limit_status = get_user_rate_limit_status(user)
@@ -334,14 +316,16 @@ def tryon_v2(request):
             user.username, user.id, used_count, limit, remaining if remaining is not None else 'Unlimited'
         )
         
-        # Return JSON response with BunnyCDN URLs and record ID
+        # Return JSON response with task info (202 Accepted)
         response_data = {
             'success': True,
-            'id': saved_record.id if saved_record else None,
+            'message': 'Try-on generation started',
+            'id': saved_record.id,
+            'task_id': task.id,
+            'status': 'processing',
             'person_image_url': person_image_url,
             'garment_image_url': garment_image_url,
-            'generated_image_url': generated_image_url,
-            'message': 'Try-on image generated successfully',
+            'estimated_time': '60-120 seconds',
             'rate_limit': {
                 'limit': limit,
                 'remaining': remaining,
@@ -352,7 +336,7 @@ def tryon_v2(request):
             'user_id': user.id
         }
         
-        response = Response(response_data, status=status.HTTP_200_OK)
+        response = Response(response_data, status=status.HTTP_202_ACCEPTED)
         
         # Add rate limit headers for client information
         response['X-RateLimit-Limit'] = str(limit) if limit > 0 else 'Unlimited'
@@ -360,11 +344,11 @@ def tryon_v2(request):
         response['X-RateLimit-Used'] = str(used_count)
         
         logger.info(
-            "API v2: Returning response for user=%s (ID: %d) - Record ID: %s, Generated URL: %s, Used: %d/%d",
+            "API v2: Returning response for user=%s (ID: %d) - Record ID: %s, Task ID: %s, Used: %d/%d",
             user.username,
             user.id,
-            saved_record.id if saved_record else None,
-            generated_image_url,
+            saved_record.id,
+            task.id,
             used_count,
             limit if limit > 0 else 0
         )
@@ -388,6 +372,89 @@ def tryon_v2(request):
             {'error': 'Internal server error while processing try-on request'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def tryon_task_status(request, tryon_request_id):
+    """
+    Check status of async try-on generation task.
+    
+    Args:
+        tryon_request_id: ID of TryonRequest
+    
+    Returns:
+        Response with task status and try-on request details
+    """
+    
+    try:
+        tryon_request = TryonRequest.objects.get(id=tryon_request_id, user=request.user)
+    except TryonRequest.DoesNotExist:
+        return Response(
+            {'error': 'Try-on request not found or does not belong to you'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    task_id = request.query_params.get('task_id')
+    
+    # Refresh from database to get latest status
+    tryon_request.refresh_from_db()
+    
+    if not task_id:
+        # Return request status only
+        return Response({
+            'tryon_request_id': tryon_request.id,
+            'status': tryon_request.status,
+            'error_message': tryon_request.error_message if tryon_request.status == 'failed' else None,
+            'generated_image_url': tryon_request.generated_image_url if tryon_request.status == 'completed' else None
+        })
+    
+    # Check Celery task status
+    task_result = AsyncResult(task_id)
+    
+    # If task failed but request is still processing, update request
+    if task_result.state == 'FAILURE' and tryon_request.status == 'processing':
+        error_msg = str(task_result.info) if task_result.info else 'Task failed'
+        try:
+            tryon_request.status = 'failed'
+            tryon_request.error_message = error_msg[:500]
+            tryon_request.save()
+            logger.warning("Updated tryon request %s to failed based on task %s failure", tryon_request_id, task_id)
+        except Exception as e:
+            logger.error("Failed to update tryon request %s status: %s", tryon_request_id, e)
+        tryon_request.refresh_from_db()
+    
+    # Build response
+    response_data = {
+        'tryon_request_id': tryon_request.id,
+        'task_id': task_id,
+        'status': tryon_request.status,
+        'task_state': task_result.state,
+    }
+    
+    if tryon_request.status == 'failed':
+        response_data['message'] = 'Generation failed'
+        response_data['error'] = tryon_request.error_message or (str(task_result.info) if task_result.state == 'FAILURE' else 'Unknown error')
+    elif tryon_request.status == 'completed':
+        response_data['message'] = 'Generation completed successfully'
+        response_data['generated_image_url'] = tryon_request.generated_image_url
+    elif task_result.state == 'PENDING':
+        response_data['message'] = 'Task is waiting to be processed'
+    elif task_result.state == 'STARTED':
+        response_data['message'] = 'Task is currently processing'
+    elif task_result.state == 'SUCCESS':
+        response_data['message'] = 'Task completed successfully'
+        response_data['result'] = task_result.result
+        response_data['generated_image_url'] = tryon_request.generated_image_url
+    elif task_result.state == 'FAILURE':
+        response_data['message'] = 'Task failed'
+        response_data['error'] = str(task_result.info)
+    elif task_result.state == 'RETRY':
+        response_data['message'] = 'Task is being retried'
+    else:
+        response_data['message'] = f'Status: {tryon_request.status}'
+    
+    return Response(response_data)
 
 
 @api_view(['GET'])
@@ -456,3 +523,74 @@ def current_version(request):
     serializer.is_valid(raise_exception=True)
     
     return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def tryon_list(request):
+    """
+    Get list of try-on requests with filtering and pagination.
+    
+    Query Parameters:
+    - status: Filter by status (pending, processing, completed, failed)
+    - device_id: Filter by device ID
+    - created_at__gte: Filter by created date (greater than or equal) - format: YYYY-MM-DD
+    - created_at__lte: Filter by created date (less than or equal) - format: YYYY-MM-DD
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 20, max: 100)
+    
+    Returns:
+    - Paginated list of try-on requests for the authenticated user
+    """
+    user = request.user
+    
+    # Base queryset - only user's own requests
+    queryset = TryonRequest.objects.filter(user=user).order_by('-created_at')
+    
+    # Apply filters using DjangoFilterBackend FilterSet
+    filterset = TryonRequestFilter(request.query_params, queryset=queryset)
+    queryset = filterset.qs
+    
+    # Apply pagination
+    paginator = TryonRequestPagination()
+    paginated_queryset = paginator.paginate_queryset(queryset, request)
+    
+    # Serialize data
+    serializer = TryonRequestSerializer(paginated_queryset, many=True)
+    
+    # Return paginated response
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def tryon_detail(request, tryon_request_id):
+    """
+    Get a single try-on request by ID.
+    
+    Args:
+        tryon_request_id: ID of TryonRequest
+    
+    Returns:
+        Response with try-on request details
+    """
+    user = request.user
+    
+    try:
+        tryon_request = TryonRequest.objects.get(id=tryon_request_id, user=user)
+    except TryonRequest.DoesNotExist:
+        return Response(
+            {
+                'error': 'Try-on request not found or does not belong to you'
+            },
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    serializer = TryonRequestSerializer(tryon_request)
+    return Response(
+        {
+            'success': True,
+            'data': serializer.data
+        },
+        status=status.HTTP_200_OK
+    )
